@@ -34,7 +34,7 @@ def render_template(template: str, values: Mapping[str, object]) -> str:
     try:
         list(Formatter().parse(text))
         return text.format_map(_SafeTemplateDict({key: str(value) for key, value in values.items()}))
-    except (ValueError, KeyError, IndexError):
+    except (ValueError, KeyError, IndexError, AttributeError, TypeError):
         return text
 
 
