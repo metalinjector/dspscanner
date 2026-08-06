@@ -88,7 +88,7 @@ def test_cancelled_scan_is_marked_as_such(documents):
 
 
 def _progress_events(folder, **overrides):
-    events = []
+    events: list[tuple[int, int, str]] = []
     DocumentScanner().run(
         ScanSettings(
             paths=[str(folder)], words=["договор"], file_types={".txt"}, **overrides
@@ -111,18 +111,49 @@ def test_precount_announces_the_counting_phase(documents):
     assert any(PRECOUNT_MESSAGE in message for message in counting)
 
 
-def test_progress_never_moves_backwards(documents):
-    """Доля заполнения полосы обязана только расти."""
-    for precount in (True, False):
-        events = [
-            (current, total)
-            for current, total, _message in _progress_events(
-                documents, precount_files=precount
-            )
-            if total > 0
-        ]
-        fractions = [current / total for current, total in events]
-        assert fractions == sorted(fractions), (precount, events)
+@pytest.fixture
+def many_documents(tmp_path):
+    """Дерево крупнее основной фикстуры.
+
+    На трёх файлах потоковый режим случайно оказывается монотонным, и проверка
+    ничего бы не доказывала.
+    """
+    folder = tmp_path / "many"
+    folder.mkdir()
+    for index in range(60):
+        (folder / f"f{index}.txt").write_text("договор", encoding="utf-8")
+    return folder
+
+
+def _fractions(folder, **overrides):
+    return [
+        current / total
+        for current, total, _message in _progress_events(folder, **overrides)
+        if total > 0
+    ]
+
+
+def test_precount_keeps_progress_monotonic(many_documents):
+    """Гарантия неубывающего прогресса даётся именно включённым подсчётом."""
+    fractions = _fractions(many_documents, precount_files=True, max_workers=4)
+    assert fractions == sorted(fractions)
+
+
+def test_without_precount_the_denominator_still_grows(many_documents):
+    """Обратная сторона, ради которой подсчёт включён по умолчанию.
+
+    Без него общее число уточняется по ходу обхода, поэтому доля выполнения
+    откатывается назад. Тест фиксирует это как известное свойство режима, а не
+    как ошибку: гарантию даёт только предварительный подсчёт.
+    """
+    totals = {
+        total
+        for _current, total, _message in _progress_events(
+            many_documents, precount_files=False, max_workers=4
+        )
+        if total > 0
+    }
+    assert len(totals) > 1
 
 
 def test_progress_reaches_the_end(documents):
