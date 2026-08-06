@@ -38,8 +38,8 @@ def export_to_csv(results: Sequence[SearchResult], file_path: str, errors: Seque
         os.replace(tmp_path, target)
         temporary.remove(tmp_path)
 
+        error_target = target.with_name(target.stem + "_errors.csv")
         if errors:
-            error_target = target.with_name(target.stem + "_errors.csv")
             fd, error_tmp, _ = _atomic_text_writer(error_target)
             temporary.append(error_tmp)
             with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as file_handle:
@@ -54,6 +54,11 @@ def export_to_csv(results: Sequence[SearchResult], file_path: str, errors: Seque
                 os.fsync(file_handle.fileno())
             os.replace(error_tmp, error_target)
             temporary.remove(error_tmp)
+        else:
+            # Прогон без ошибок не должен оставлять рядом с отчётом файл ошибок
+            # предыдущего прогона: reporting.export_report определяет вложение
+            # по факту существования этого файла и приложил бы чужие данные.
+            error_target.unlink(missing_ok=True)
         return True
     except OSError:
         return False
