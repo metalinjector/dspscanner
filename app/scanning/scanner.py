@@ -285,7 +285,10 @@ class DocumentScanner:
             if reason == "temp":
                 stats.temp_files += 1
             stats.skipped += 1
-            if reason in {"missing_or_inaccessible_root", "inaccessible_directory", "not_regular"}:
+            if reason in {
+                "missing_or_inaccessible_root", "inaccessible_directory",
+                "not_regular", "symlink",
+            }:
                 log("WARNING", f"Путь пропущен ({reason}): {path}", path)
 
         discovery_size_limit = (

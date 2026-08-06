@@ -27,7 +27,11 @@ def iter_files_safe(
     on_dir_visited: Optional[Callable[[str], None]] = None,
     on_skip: Optional[Callable[[str, str], None]] = None,
 ) -> Iterator[FileEntry]:
-    """Итерирует по обычным файлам без перехода в символьные ссылки-каталоги.
+    """Итерирует по обычным файлам, не переходя ни по каким символьным ссылкам.
+
+    Ни каталоги-ссылки, ни файлы-ссылки не раскрываются: обход не должен
+    выходить за пределы выбранных корней. Сами корни берутся как есть — их
+    выбрал оператор, поэтому корень-ссылка обходится нормально.
 
     ``os.scandir`` использует кэш ``DirEntry.stat`` и обычно заметно быстрее
     связки ``os.walk + Path.stat`` на больших деревьях и сетевых дисках.
@@ -87,7 +91,15 @@ def iter_files_safe(
                                 if not _is_ignored_dir(dir_entry.name):
                                     child_dirs.append(Path(dir_entry.path))
                                 continue
-                            if not dir_entry.is_file(follow_symlinks=True):
+                            # Ссылка внутри дерева может указывать на файл вне
+                            # выбранного каталога; его текст попал бы в отчёт и
+                            # письмо, хотя оператор этот каталог не выбирал.
+                            # Цели внутри дерева всё равно обходятся по своему
+                            # настоящему пути, поэтому ничего не теряется.
+                            if dir_entry.is_symlink():
+                                skip(dir_entry.path, "symlink")
+                                continue
+                            if not dir_entry.is_file(follow_symlinks=False):
                                 continue
                         except OSError:
                             skip(dir_entry.path, "inaccessible")
@@ -97,7 +109,7 @@ def iter_files_safe(
                             skip(dir_entry.path, "temp")
                             continue
                         try:
-                            entry_stat = dir_entry.stat(follow_symlinks=True)
+                            entry_stat = dir_entry.stat(follow_symlinks=False)
                         except OSError:
                             skip(dir_entry.path, "inaccessible")
                             continue

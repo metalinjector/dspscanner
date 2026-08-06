@@ -91,6 +91,17 @@ class DocxReader(BaseReader):
             # табличных документах. python-docx остаётся совместимым fallback.
             text = self._read_manual_xml(archive)
             if text:
+                # Импортированный через altChunk раздел лежит в отдельной
+                # MHTML-части и не виден XML-парсеру. Без склейки содержимое
+                # такого раздела терялось в любом документе, где есть хотя бы
+                # один обычный абзац. namelist() уже в памяти, поэтому для
+                # документов без altChunk проверка ничего не стоит.
+                altchunk = self._read_altchunk_parts(archive)
+                if altchunk and altchunk not in text:
+                    return ReaderOutcome(
+                        text=f"{text}\n\n{altchunk}",
+                        method_used="manual-xml+altchunk",
+                    )
                 return ReaderOutcome(text=text, method_used="manual-xml")
 
         # python-docx и altchunk открывают файл самостоятельно; они остаются
@@ -192,19 +203,27 @@ class DocxReader(BaseReader):
 
     @staticmethod
     def _read_altchunk(path: Path) -> Optional[str]:
+        """Fallback-путь: открывает архив самостоятельно."""
         try:
             with zipfile.ZipFile(path) as archive:
-                names = [
-                    name for name in archive.namelist()
-                    if name.lower().startswith("word/")
-                    and name.lower().endswith((".mht", ".mhtml"))
-                ]
-                if not names:
-                    return None
-                info = archive.getinfo(names[0])
-                if info.file_size > DOCX_MAX_SINGLE_ENTRY_BYTES:
-                    return None
-                data = archive.read(names[0])
+                return DocxReader._read_altchunk_parts(archive)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_altchunk_parts(archive: zipfile.ZipFile) -> Optional[str]:
+        try:
+            names = [
+                name for name in archive.namelist()
+                if name.lower().startswith("word/")
+                and name.lower().endswith((".mht", ".mhtml"))
+            ]
+            if not names:
+                return None
+            info = archive.getinfo(names[0])
+            if info.file_size > DOCX_MAX_SINGLE_ENTRY_BYTES:
+                return None
+            data = archive.read(names[0])
         except Exception:
             return None
 

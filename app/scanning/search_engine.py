@@ -60,7 +60,13 @@ def _build_pattern(word: str, case_sensitive: bool, whole_word: bool) -> re.Patt
     if not case_sensitive:
         pattern = re.sub(r"[еёЕЁ]", "[её]", pattern)
     if whole_word:
-        pattern = rf"\b{pattern}\b"
+        # \b существует только на стыке \w и \W, поэтому термины, начинающиеся
+        # или заканчивающиеся пунктуацией ("C++", "№ 42", "(проект)"), в режиме
+        # целых слов не находились вовсе. Lookaround проверяет ровно то, что
+        # требуется: рядом не должно быть символа слова. Для терминов из букв и
+        # цифр поведение совпадает с прежним \b, а Aho-ветка использует ту же
+        # проверку через _is_word_char.
+        pattern = rf"(?<!\w){pattern}(?!\w)"
 
     flags = 0 if case_sensitive else re.IGNORECASE
     return re.compile(pattern, flags)
