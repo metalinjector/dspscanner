@@ -103,6 +103,18 @@ def test_context_column_fits_the_actual_text(window):
     assert width - text_width <= _CONTEXT_COLUMN_PADDING
 
 
+def test_all_result_columns_are_manually_resizable(window):
+    """Каждую границу заголовка можно перетаскивать мышью."""
+    from PySide6.QtWidgets import QHeaderView
+
+    header = window.results_table.horizontalHeader()
+    assert not header.stretchLastSection()
+    assert all(
+        header.sectionResizeMode(index) == QHeaderView.Interactive
+        for index in range(window.results_model.columnCount())
+    )
+
+
 def test_fitted_column_does_not_cut_the_text(window):
     """Подгонка не должна экономить ширину ценой обрезки многоточием."""
     from PySide6.QtCore import Qt

@@ -806,20 +806,20 @@ class MainWindow(QMainWindow):
         self.results_table.setWordWrap(False)
 
         header = self.results_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        # Все столбцы остаются управляемыми пользователем: режимы
+        # ResizeToContents и Stretch блокируют ручное перетаскивание границ.
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        for index, width in enumerate(
+            (220, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 320)
+        ):
+            self.results_table.setColumnWidth(index, width)
         # Ширина «Контекста» подгоняется под реальные строки, а не берётся
         # фиксированной: длина контекста задаётся настройкой и обычно намного
         # меньше, чем прежние 900 px, из-за чего справа оставалась пустота.
         # Режим Interactive сохранён намеренно: ResizeToContents измеряет
         # каждую строку модели при любой перекомпоновке, а строк бывают сотни
         # тысяч.
-        self.results_table.setColumnWidth(3, _CONTEXT_COLUMN_MIN_WIDTH)
         header.sectionResized.connect(self._on_results_section_resized)
 
         self.results_table.setItemDelegateForColumn(
