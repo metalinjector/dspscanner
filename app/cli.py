@@ -340,6 +340,28 @@ def _template_values(report: ScanReport) -> dict[str, object]:
     }
 
 
+def _force_utf8_streams() -> None:
+    """Печатает вывод в UTF-8 независимо от кодировки локали.
+
+    Когда stdout не является консолью (Планировщик заданий Windows, запись в
+    лог-файл, конвейер, CI), Python кодирует вывод в кодировку локали. На
+    Windows с не-кириллической локалью первая же строка с русским текстом
+    завершала работу с UnicodeEncodeError, а в stderr сообщения превращались
+    в escape-последовательности вида ``\\u0434``. Ошибка возникала до начала
+    сканирования, поэтому отчёт не создавался вовсе.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            # errors="replace" — на случай неразбираемых имён файлов с
+            # суррогатными символами: испорченный символ лучше падения.
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -357,6 +379,7 @@ def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:
+    _force_utf8_streams()
     parser = _parser()
     args = parser.parse_args(argv)
     try:
