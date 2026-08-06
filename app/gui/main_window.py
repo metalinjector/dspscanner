@@ -91,7 +91,13 @@ from app.gui.results_model import (
     HighlightDelegate,
     file_tooltip_html,
 )
-from app.gui.workers import ScanWorker, CopyWorker, SecureOpWorker, EmailReportWorker
+from app.gui.workers import (
+    ScanWorker,
+    CopyWorker,
+    SecureOpWorker,
+    EmailReportWorker,
+    SingleFileTestWorker,
+)
 from app.gui.settings_dialog import SettingsDialog
 from app.gui.email_settings_dialog import EmailSettingsDialog
 from app.gui.unreadable_files_dialog import UnreadableFilesDialog
@@ -99,8 +105,6 @@ from app.gui.result_contexts_dialog import ResultContextsDialog
 from app.fileops.file_operations import CopyMapping, OperationResult
 from app.export.excel_export import export_to_excel
 from app.export.text_exports import export_to_csv, export_to_markdown
-from app.readers import extract_text
-from app.readers.doc_reader import _release_word_all
 from app.scanning.term_parser import parse_terms
 from app.email_settings import EmailSettings, load_email_settings
 from app.reporting import build_search_info
@@ -213,6 +217,7 @@ class MainWindow(QMainWindow):
         self.error_copy_worker: Optional[CopyWorker] = None
         self.error_secure_worker: Optional[SecureOpWorker] = None
         self.email_worker: Optional[EmailReportWorker] = None
+        self.single_file_worker: Optional[SingleFileTestWorker] = None
         self.copy_mappings: List[CopyMapping] = []
         self.last_report: Optional[ScanReport] = None
         self.last_search_info: dict = {}
@@ -1122,6 +1127,14 @@ class MainWindow(QMainWindow):
         )
 
     def _test_single_file(self) -> None:
+        if self.single_file_worker is not None and self.single_file_worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Проверка выполняется",
+                "Дождитесь окончания текущей проверки файла.",
+            )
+            return
+
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Выберите файл для проверки чтения и OCR",
@@ -1141,14 +1154,32 @@ class MainWindow(QMainWindow):
         )
         settings.pdf_page_limit = self.pdf_page_limit_spin.value()
 
-        start = time.monotonic()
-        outcome = extract_text(file_path, file_path.suffix, settings)
-        elapsed = time.monotonic() - start
+        # Чтение и OCR уходят в отдельный поток: на многостраничном скане
+        # операция длится минуты, а общего таймаута у неё нет.
+        self.test_file_btn.setEnabled(False)
+        self.status_bar.showMessage(f"Проверка чтения: {file_path.name}…")
+        self.single_file_worker = SingleFileTestWorker(file_path, settings)
+        self.single_file_worker.finished_ok.connect(
+            lambda outcome, elapsed, target=file_path: self._on_single_file_tested(
+                target, outcome, elapsed
+            )
+        )
+        self.single_file_worker.failed.connect(self._on_single_file_test_failed)
+        self.single_file_worker.start()
 
-        try:
-            _release_word_all()
-        except Exception:
-            pass
+    def _on_single_file_test_failed(self, message: str) -> None:
+        self.test_file_btn.setEnabled(True)
+        self.status_bar.showMessage("Проверка файла завершилась ошибкой")
+        self.logger.error("Диагностика чтения файла не выполнена: %s", message)
+        QMessageBox.critical(self, "Ошибка проверки файла", message)
+        self._maybe_close_after_workers()
+
+    def _on_single_file_tested(self, file_path: Path, outcome, elapsed: float) -> None:
+        self.test_file_btn.setEnabled(True)
+        self.status_bar.showMessage(f"Проверка завершена: {file_path.name}")
+        if self._closing_after_scan:
+            self._maybe_close_after_workers()
+            return
 
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Диагностика чтения: {file_path.name}")
@@ -2398,6 +2429,7 @@ class MainWindow(QMainWindow):
                 self.error_copy_worker,
                 self.error_secure_worker,
                 self.email_worker,
+                self.single_file_worker,
             )
         )
 
