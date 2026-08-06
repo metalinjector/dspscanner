@@ -244,6 +244,18 @@ class ResultsTableModel(QAbstractTableModel):
         self._paths_by_name: dict[str, set[str]] = {}
         self._rows_by_name: dict[str, list[int]] = {}
         self._label_by_path: dict[str, str] = {}
+        # Самый длинный контекст нужен для подгонки ширины столбца. Копить его
+        # по мере поступления дешевле, чем измерять все строки при каждой
+        # перекомпоновке заголовка.
+        self._longest_context = ""
+
+    def longest_context(self) -> str:
+        """Самая длинная строка столбца «Контекст» среди загруженных."""
+        return self._longest_context
+
+    def _note_context(self, result: SearchResult) -> None:
+        if len(result.context) > len(self._longest_context):
+            self._longest_context = result.context
 
     @staticmethod
     def _key(result: SearchResult) -> tuple[str, str]:
@@ -335,6 +347,7 @@ class ResultsTableModel(QAbstractTableModel):
         order: list[tuple[str, str]] = []
         for result in results:
             self._all_results.append(result)
+            self._note_context(result)
             key = self._key(result)
             if key not in incoming:
                 incoming[key] = []
@@ -388,6 +401,7 @@ class ResultsTableModel(QAbstractTableModel):
         self._paths_by_name = {}
         self._rows_by_name = {}
         self._label_by_path = {}
+        self._longest_context = ""
 
     def result_at(self, row: int) -> SearchResult:
         return self._groups[row].primary
@@ -432,6 +446,7 @@ class ResultsTableModel(QAbstractTableModel):
             else:
                 self._groups[row].results.append(result)
             self._all_results.append(result)
+            self._note_context(result)
         # Удаление файла может вернуть имени однозначность: уточнение папкой
         # больше не нужно, и подпись снова становится просто именем.
         self._refresh_labels(self._paths_by_name)

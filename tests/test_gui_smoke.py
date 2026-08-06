@@ -77,6 +77,85 @@ def test_known_total_switches_progress_to_determinate(window):
     assert window.processing_list.count() == 1
 
 
+CONTEXT_COLUMN = 3
+TYPICAL_CONTEXT = (
+    "Для служебного пользования, беспилотники. Лекарственные поражения печени явля…"
+)
+
+
+def _feed_context(window, context, matched="беспилотники", name="f.pdf"):
+    window._on_results_found([
+        SearchResult(name, f"/d/{name}", "беспилот*", context, "pdf", "2026",
+                     matched_text=matched)
+    ])
+
+
+def test_context_column_fits_the_actual_text(window):
+    """Ширина была жёстко задана 900 px, а контекст ограничен настройкой."""
+    from app.gui.main_window import _CONTEXT_COLUMN_PADDING
+
+    _feed_context(window, TYPICAL_CONTEXT)
+    width = window.results_table.columnWidth(CONTEXT_COLUMN)
+    text_width = window.results_table.fontMetrics().horizontalAdvance(TYPICAL_CONTEXT)
+
+    assert width < 900, "столбец остался прежней фиксированной ширины"
+    # Пустоты справа не больше технического запаса на полужирные совпадения.
+    assert width - text_width <= _CONTEXT_COLUMN_PADDING
+
+
+def test_fitted_column_does_not_cut_the_text(window):
+    """Подгонка не должна экономить ширину ценой обрезки многоточием."""
+    from PySide6.QtCore import Qt
+
+    _feed_context(window, TYPICAL_CONTEXT)
+    # Делегат рисует внутри rect.adjusted(6, 0, -6, 0).
+    available = window.results_table.columnWidth(CONTEXT_COLUMN) - 12
+    metrics = window.results_table.fontMetrics()
+    assert metrics.elidedText(TYPICAL_CONTEXT, Qt.ElideRight, available) == TYPICAL_CONTEXT
+
+
+def test_context_column_respects_its_bounds(window):
+    from app.gui.main_window import (
+        _CONTEXT_COLUMN_MAX_WIDTH,
+        _CONTEXT_COLUMN_MIN_WIDTH,
+    )
+
+    _feed_context(window, "…мало…")
+    assert window.results_table.columnWidth(CONTEXT_COLUMN) == _CONTEXT_COLUMN_MIN_WIDTH
+
+    window.results_model.clear()
+    _feed_context(window, "очень длинный контекст " * 80, matched="контекст")
+    assert window.results_table.columnWidth(CONTEXT_COLUMN) == _CONTEXT_COLUMN_MAX_WIDTH
+
+
+def test_manual_resize_disables_auto_fit(window):
+    """Пользователь выставил ширину сам — переопределять её навязчиво."""
+    _feed_context(window, TYPICAL_CONTEXT)
+    window.results_table.setColumnWidth(CONTEXT_COLUMN, 400)
+    assert window._context_column_user_sized
+
+    _feed_context(window, "очень длинный контекст " * 80, matched="контекст", name="g.pdf")
+    assert window.results_table.columnWidth(CONTEXT_COLUMN) == 400
+
+
+def test_auto_fit_grows_with_a_longer_context(window):
+    _feed_context(window, "…короткий контекст с совпадением беспилотники тут…")
+    narrow = window.results_table.columnWidth(CONTEXT_COLUMN)
+    _feed_context(window, TYPICAL_CONTEXT * 2, name="g.pdf")
+    assert window.results_table.columnWidth(CONTEXT_COLUMN) > narrow
+
+
+def test_model_tracks_the_longest_context(qt_app):
+    model = ResultsTableModel()
+    model.add_results([
+        _result(name="a.txt", context="короткий"),
+        _result(name="b.txt", context="значительно более длинный контекст"),
+    ])
+    assert model.longest_context() == "значительно более длинный контекст"
+    model.clear()
+    assert model.longest_context() == ""
+
+
 def test_precount_is_enabled_by_default_and_reaches_settings(window):
     assert window.precount_check.isChecked()
     assert window._collect_settings_silent().precount_files is True

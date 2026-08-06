@@ -119,6 +119,14 @@ from app.scan_config_store import (
 )
 
 
+_CONTEXT_COLUMN_INDEX = 3
+_CONTEXT_COLUMN_MIN_WIDTH = 260
+_CONTEXT_COLUMN_MAX_WIDTH = 900
+# Поля ячейки в делегате подсветки плюс запас на полужирные фрагменты
+# совпадений: измеряем обычным шрифтом, а рисуются они шире.
+_CONTEXT_COLUMN_PADDING = 28
+
+
 def _resource_path(relative: str) -> Path:
     """Путь к ресурсу в исходниках и в будущей сборке PyInstaller."""
     import sys
@@ -226,6 +234,10 @@ class MainWindow(QMainWindow):
         self._unreadable_entries = []
         self.email_settings = EmailSettings()
         self._closing_after_scan = False
+        # Флаги подгонки ширины «Контекста» выставляются до _build_ui():
+        # обработчик sectionResized подключается уже там.
+        self._context_column_user_sized = False
+        self._adjusting_context_column = False
         self._restoring_scan_config = True
         self._updating_paths_programmatically = False
         self._paths_mode = "custom"
@@ -801,7 +813,14 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.Stretch)
-        self.results_table.setColumnWidth(3, 900)
+        # Ширина «Контекста» подгоняется под реальные строки, а не берётся
+        # фиксированной: длина контекста задаётся настройкой и обычно намного
+        # меньше, чем прежние 900 px, из-за чего справа оставалась пустота.
+        # Режим Interactive сохранён намеренно: ResizeToContents измеряет
+        # каждую строку модели при любой перекомпоновке, а строк бывают сотни
+        # тысяч.
+        self.results_table.setColumnWidth(3, _CONTEXT_COLUMN_MIN_WIDTH)
+        header.sectionResized.connect(self._on_results_section_resized)
 
         self.results_table.setItemDelegateForColumn(
             0, HighlightDelegate(filename_column=True)
@@ -1557,6 +1576,8 @@ class MainWindow(QMainWindow):
         for result in results:
             self._add_found_file_path(result.full_path)
 
+        self._auto_fit_context_column()
+
         occurrence_count = self.results_model.occurrence_count()
         self.stat_cards["found"].set_value(occurrence_count)
         self.status_bar.showMessage(
@@ -1565,6 +1586,41 @@ class MainWindow(QMainWindow):
         )
         if follow_tail:
             self.results_table.scrollToBottom()
+
+    def _on_results_section_resized(self, index: int, _old: int, _new: int) -> None:
+        """Ручное перетаскивание границы отключает автоподгонку.
+
+        Пользователь выставил ширину сам — переопределять её при следующей
+        порции результатов было бы навязчиво.
+        """
+        if index == _CONTEXT_COLUMN_INDEX and not self._adjusting_context_column:
+            self._context_column_user_sized = True
+
+    def _auto_fit_context_column(self) -> None:
+        """Подгоняет «Контекст» под самую длинную строку столбца.
+
+        Измеряется одна строка, а не вся модель: длина контекста ограничена
+        настройкой, поэтому самая длинная по числу символов практически всегда
+        и самая широкая. Возможная погрешность пропорционального шрифта
+        перекрывается запасом ``_CONTEXT_COLUMN_PADDING``.
+        """
+        if self._context_column_user_sized:
+            return
+        longest = self.results_model.longest_context()
+        if not longest:
+            return
+        width = self.results_table.fontMetrics().horizontalAdvance(longest)
+        width = max(
+            _CONTEXT_COLUMN_MIN_WIDTH,
+            min(_CONTEXT_COLUMN_MAX_WIDTH, width + _CONTEXT_COLUMN_PADDING),
+        )
+        if width == self.results_table.columnWidth(_CONTEXT_COLUMN_INDEX):
+            return
+        self._adjusting_context_column = True
+        try:
+            self.results_table.setColumnWidth(_CONTEXT_COLUMN_INDEX, width)
+        finally:
+            self._adjusting_context_column = False
 
     def _update_scan_timer(self) -> None:
         """Обновляет карточку 'Время сканирования' в реальном времени."""
@@ -1606,6 +1662,7 @@ class MainWindow(QMainWindow):
         self._unreadable_entries = list(report.unreadable_files)
         self._update_unreadable_files_button()
         self._populate_found_files()
+        self._auto_fit_context_column()
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setProperty("active", False)
