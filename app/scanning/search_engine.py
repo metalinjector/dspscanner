@@ -171,6 +171,14 @@ def _find_aho_positions(
             if len(bucket) >= max_matches_per_word:
                 continue
             start = end - automaton.lengths[pattern_index] + 1
+            # Совпадения одного паттерна поступают в порядке возрастания end
+            # (длина фиксирована, значит и start не убывает), поэтому отсекаем
+            # пересекающиеся вхождения сравнением с последним принятым. Это
+            # повторяет not-overlapping семантику re.finditer regex-ветки:
+            # без отсечения счёт совпадений файла зависел бы от того, набрался
+            # ли порог _AHO_MIN_TERMS.
+            if bucket and start < bucket[-1][1]:
+                continue
             if whole_word:
                 if start > 0 and _is_word_char(text[start - 1]):
                     continue
