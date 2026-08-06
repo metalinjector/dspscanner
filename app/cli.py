@@ -90,6 +90,16 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="после быстрой эвристики повторять ошибочные DOC внешними программами",
     )
+    reading.add_argument(
+        "--precount",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "перед обработкой быстро посчитать все подходящие файлы, чтобы "
+            "прогресс знал общее число сразу; --no-precount начинает обработку "
+            "немедленно, но общее число уточняется по ходу"
+        ),
+    )
     reading.add_argument("--workers", type=int, help="число параллельных потоков")
     reading.add_argument("--timeout", type=int, help="таймаут чтения одного файла, секунд")
     reading.add_argument("--libreoffice", metavar="FILE", help="путь к soffice/LibreOffice для этого запуска")
@@ -250,6 +260,7 @@ def build_scan_settings(args: argparse.Namespace, config: Mapping[str, Any]) -> 
             "external_after_heuristic_failure",
             True,
         ),
+        precount_files=_bool_value(args.precount, config, "precount_files", True),
         max_matches_per_word=int(
             args.max_matches
             if args.max_matches is not None

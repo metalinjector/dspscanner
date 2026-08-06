@@ -602,6 +602,19 @@ class MainWindow(QMainWindow):
         toggles.addStretch(1)
         layout.addLayout(toggles)
 
+        self.precount_check = QCheckBox("Сначала подсчитать все файлы")
+        self.precount_check.setChecked(True)
+        self.precount_check.setToolTip(
+            "Включено: перед чтением выполняется быстрый обход каталогов, и\n"
+            "прогресс сразу знает общее число файлов — полоса заполняется\n"
+            "равномерно от 0 до 100%.\n"
+            "Выключено: обработка стартует немедленно, но общее число\n"
+            "уточняется по ходу, поэтому заполнение полосы скачет назад.\n"
+            "Отключайте на очень медленных сетевых дисках, где сам обход\n"
+            "каталогов занимает заметное время."
+        )
+        layout.addWidget(self.precount_check)
+
         pdf_pages_row = QHBoxLayout()
         pdf_pages_row.setSpacing(8)
         self.limit_pdf_pages_check = QCheckBox("Искать только на первых")
@@ -1124,6 +1137,7 @@ class MainWindow(QMainWindow):
             use_external_programs_after_heuristic_failure=(
                 self.heuristic_external_check.isChecked()
             ),
+            precount_files=self.precount_check.isChecked(),
         )
 
     def _test_single_file(self) -> None:
@@ -1342,6 +1356,7 @@ class MainWindow(QMainWindow):
             use_external_programs_after_heuristic_failure=(
                 self.heuristic_external_check.isChecked()
             ),
+            precount_files=self.precount_check.isChecked(),
         )
         errors = settings.validate()
         if errors:
@@ -1441,7 +1456,8 @@ class MainWindow(QMainWindow):
             f"OCR={settings.use_ocr_for_pdf} | "
             f"лимит_PDF_страниц="
             f"{settings.pdf_page_limit if settings.limit_pdf_pages else 'все'} | "
-            f"потоков={settings.max_workers} | лимит_совпадений={settings.max_matches_per_word}"
+            f"потоков={settings.max_workers} | лимит_совпадений={settings.max_matches_per_word} | "
+            f"предподсчёт={settings.precount_files}"
         )
         self.logger.info(log_msg)
 
@@ -1499,9 +1515,18 @@ class MainWindow(QMainWindow):
             self.logger.warning("Сканирование прервано пользователем")
 
     def _on_progress(self, current: int, total: int, message: str) -> None:
-        if total > 0:
-            self.progress_bar.setMaximum(total)
-            self.progress_bar.setValue(current)
+        # total == 0 означает подготовительную фазу: идёт предварительный
+        # подсчёт либо поиск первых файлов. Общее число ещё не известно,
+        # поэтому «Обработано: 0 / 0» вводило бы в заблуждение, а полоса
+        # остаётся в неопределённом режиме и просто показывает активность.
+        if total <= 0:
+            if message:
+                self.progress_label.setText(message)
+                self.status_bar.showMessage(message)
+            return
+
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
         self.progress_label.setText(f"Обработано: {current} / {total}")
 
         if message:
@@ -2173,6 +2198,7 @@ class MainWindow(QMainWindow):
             "external_after_heuristic_failure": (
                 self.heuristic_external_check.isChecked()
             ),
+            "precount_files": self.precount_check.isChecked(),
             "case_sensitive": self.case_sensitive_check.isChecked(),
             "whole_word": self.whole_word_check.isChecked(),
             "use_ocr": self.ocr_check.isChecked(),
@@ -2239,6 +2265,7 @@ class MainWindow(QMainWindow):
                 bool(config.get("external_after_heuristic_failure", True))
             )
             self._update_heuristic_external_visibility()
+            self.precount_check.setChecked(bool(config.get("precount_files", True)))
 
             self.case_sensitive_check.setChecked(
                 bool(config.get("case_sensitive", False))
@@ -2300,6 +2327,7 @@ class MainWindow(QMainWindow):
             self.ocr_check,
             self.limit_pdf_pages_check,
             self.heuristic_external_check,
+            self.precount_check,
         ):
             checkbox.toggled.connect(self._schedule_auto_save)
         self.doc_method_combo.currentIndexChanged.connect(self._schedule_auto_save)

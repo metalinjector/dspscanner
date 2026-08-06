@@ -12,7 +12,7 @@ import pytest
 
 from app.config import ScanSettings
 from app.email_settings import EmailSettings, invalid_addresses, safe_header
-from app.scanning.scanner import DocumentScanner
+from app.scanning.scanner import PRECOUNT_MESSAGE, DocumentScanner
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,6 +87,122 @@ def test_cancelled_scan_is_marked_as_such(documents):
     assert report.cancelled is True
 
 
+def _progress_events(folder, **overrides):
+    events = []
+    DocumentScanner().run(
+        ScanSettings(
+            paths=[str(folder)], words=["договор"], file_types={".txt"}, **overrides
+        ),
+        on_progress=lambda current, total, message: events.append((current, total, message)),
+    )
+    return events
+
+
+def test_precount_fixes_the_progress_denominator(documents):
+    """Ради этого подсчёт и делается: знаменатель не меняется по ходу."""
+    events = _progress_events(documents, precount_files=True)
+    totals = {total for _current, total, _message in events if total > 0}
+    assert totals == {3}
+
+
+def test_precount_announces_the_counting_phase(documents):
+    events = _progress_events(documents, precount_files=True)
+    counting = [message for _current, total, message in events if total == 0]
+    assert any(PRECOUNT_MESSAGE in message for message in counting)
+
+
+def test_progress_never_moves_backwards(documents):
+    """Доля заполнения полосы обязана только расти."""
+    for precount in (True, False):
+        events = [
+            (current, total)
+            for current, total, _message in _progress_events(
+                documents, precount_files=precount
+            )
+            if total > 0
+        ]
+        fractions = [current / total for current, total in events]
+        assert fractions == sorted(fractions), (precount, events)
+
+
+def test_progress_reaches_the_end(documents):
+    events = _progress_events(documents, precount_files=True)
+    current, total, _message = next(
+        event for event in reversed(events) if event[1] > 0
+    )
+    assert current == total == 3
+
+
+def test_precount_counts_exactly_what_gets_processed(tmp_path):
+    """Фильтры подсчёта и обработки обязаны совпадать.
+
+    Иначе полоса застревала бы, не доходя до конца, либо упиралась в 100%
+    раньше времени.
+    """
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.txt").write_text("договор", encoding="utf-8")
+    (folder / "b.txt").write_text("договор", encoding="utf-8")
+    (folder / "чужой.pdf").write_text("договор", encoding="utf-8")
+    (folder / "~$temp.txt").write_text("договор", encoding="utf-8")
+    (folder / "empty.txt").write_text("", encoding="utf-8")
+
+    counted = DocumentScanner._precount_files(
+        ScanSettings(paths=[str(folder)], words=["договор"], file_types={".txt"}),
+        10**9,
+        Event(),
+        None,
+    )
+    report = DocumentScanner().run(
+        ScanSettings(paths=[str(folder)], words=["договор"], file_types={".txt"})
+    )
+    assert counted == report.stats.processed == 2
+
+
+def test_precount_does_not_double_count_skips(tmp_path):
+    """Пропуски учитывает только основной проход."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "ok.txt").write_text("договор", encoding="utf-8")
+    (folder / "~$temp.txt").write_text("договор", encoding="utf-8")
+
+    with_precount = DocumentScanner().run(
+        ScanSettings(paths=[str(folder)], words=["договор"], file_types={".txt"},
+                     precount_files=True)
+    )
+    without = DocumentScanner().run(
+        ScanSettings(paths=[str(folder)], words=["договор"], file_types={".txt"},
+                     precount_files=False)
+    )
+    assert with_precount.stats.skipped == without.stats.skipped == 1
+
+
+def test_precount_is_cancellable_and_yields_no_total():
+    cancel = Event()
+    cancel.set()
+    assert DocumentScanner._precount_files(
+        ScanSettings(paths=["/"], words=["x"], file_types={".txt"}),
+        10**9,
+        cancel,
+        None,
+    ) == 0
+
+
+def test_results_are_identical_with_and_without_precount(documents):
+    with_precount = DocumentScanner().run(
+        ScanSettings(paths=[str(documents)], words=["договор"], file_types={".txt"},
+                     precount_files=True)
+    )
+    without = DocumentScanner().run(
+        ScanSettings(paths=[str(documents)], words=["договор"], file_types={".txt"},
+                     precount_files=False)
+    )
+    assert [r.full_path for r in with_precount.results] == [
+        r.full_path for r in without.results
+    ]
+    assert with_precount.stats.processed == without.stats.processed
+
+
 def test_progress_and_log_callbacks_fire(documents):
     seen_progress, seen_logs = [], []
     DocumentScanner().run(
@@ -118,6 +234,37 @@ def test_cli_end_to_end_creates_report_and_summary(documents, tmp_path):
     assert summary["processed"] == 3
     assert summary["matches"] == 3
     assert summary["email_sent"] is False
+
+
+@pytest.mark.parametrize("flag", ["--precount", "--no-precount"])
+def test_cli_accepts_both_precount_modes(documents, tmp_path, flag):
+    report_path = tmp_path / f"report{flag}.md"
+    completed = run_cli(
+        "--no-config", flag,
+        "--path", str(documents),
+        "--content-terms", "договор",
+        "--types", "txt",
+        "--format", "md",
+        "--output", str(report_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert report_path.is_file()
+
+
+def test_cli_reports_the_total_before_processing_starts(documents, tmp_path):
+    """В консоли предподсчёт виден как знаменатель, известный с первой строки."""
+    completed = run_cli(
+        "--no-config", "--precount",
+        "--path", str(documents),
+        "--content-terms", "договор",
+        "--types", "txt",
+        "--format", "md",
+        "--output", str(tmp_path / "r.md"),
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Предварительный подсчёт файлов" in completed.stdout
+    # Ни одной строки прогресса со знаменателем, меньшим итогового.
+    assert "[1/3]" in completed.stdout
 
 
 def test_cli_rejects_unsupported_file_type(documents):

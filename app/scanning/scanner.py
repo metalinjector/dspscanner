@@ -39,6 +39,11 @@ _RISKY_EXTENSIONS = {".doc", ".pdf"}
 # Используется и при формировании сообщения таймаута, и при его классификации
 # в record_problem(), чтобы обе точки не могли разойтись при правке текста.
 TIMEOUT_MARKER = "Таймаут чтения файла"
+# Фаза предварительного подсчёта сообщается через on_progress с total == 0:
+# это же условие означает «общее число ещё не известно, полоса прогресса не
+# имеет точки отсчёта». Как только total > 0, знаменатель больше не меняется.
+PRECOUNT_MESSAGE = "Предварительный подсчёт файлов"
+_PRECOUNT_REPORT_EVERY = 250
 _ISOLATE_DOCX_ABOVE_BYTES = 16 * 1024 * 1024
 _CPU_COUNT = max(1, os.cpu_count() or 1)
 _RISKY_PROCESS_LIMIT = min(4, max(1, _CPU_COUNT // 2))
@@ -333,6 +338,16 @@ class DocumentScanner:
             finally:
                 put_discovery_event(("done", None, None))
 
+        # Предварительный подсчёт выполняется до запуска обработки: только так
+        # знаменатель прогресса известен с первого обработанного файла и больше
+        # не меняется. Обход идёт теми же фильтрами, что и основной проход,
+        # поэтому итог совпадает с числом файлов, которые будут прочитаны.
+        precounted_total = 0
+        if settings.precount_files:
+            precounted_total = self._precount_files(
+                settings, discovery_size_limit, cancel_event, on_progress
+            )
+
         discovery_thread = Thread(
             target=discover_files,
             name="dsp-discovery",
@@ -340,9 +355,27 @@ class DocumentScanner:
         )
         discovery_thread.start()
         if on_progress:
-            on_progress(0, 0, "Поиск файлов и запуск обработки…")
+            if precounted_total:
+                on_progress(
+                    0,
+                    precounted_total,
+                    f"Найдено файлов: {precounted_total}. Начинаю обработку",
+                )
+            else:
+                on_progress(0, 0, "Поиск файлов и запуск обработки…")
         per_file_timeout = app_settings.per_file_timeout
         processed_count = 0
+
+        def progress_total() -> int:
+            """Знаменатель прогресса.
+
+            При включённом подсчёте это заранее известное число, и полоса
+            заполняется линейно. Дерево могло измениться между подсчётом и
+            обработкой, поэтому знаменатель никогда не опускается ниже уже
+            найденного и уже обработанного: полоса не откатывается назад.
+            """
+            return max(precounted_total, discovered_count, processed_count)
+
         pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dsp-file")
         cancelled_pool = False
         large_file_slots = BoundedSemaphore(max(1, min(4, max_workers)))
@@ -456,7 +489,7 @@ class DocumentScanner:
             else:
                 record_problem(entry, warning, error, locked)
             if on_progress:
-                on_progress(processed_count, max(discovered_count, processed_count), entry.path.name)
+                on_progress(processed_count, progress_total(), entry.path.name)
             if on_stats:
                 on_stats(stats)
 
@@ -480,7 +513,10 @@ class DocumentScanner:
                     if isinstance(entry, FileEntry):
                         discovered_count += 1
                         future_map[pool.submit(process_entry, entry)] = entry
-                        if on_progress and (
+                        # После предварительного подсчёта общее число уже
+                        # известно и объявлено, поэтому счётчик найденного не
+                        # дублируется.
+                        if on_progress and not precounted_total and (
                             discovered_count == 1 or discovered_count % 25 == 0
                         ):
                             on_progress(
@@ -540,8 +576,10 @@ class DocumentScanner:
         # прочитанные успешно, повторно не открываются.
         if heuristic_retry_candidates and not cancel_event.is_set():
             retry_count = len(heuristic_retry_candidates)
-            retry_total = discovered_count + retry_count
-            retry_progress = discovered_count
+            # Повторный проход добавляется к уже пройденному объёму, иначе
+            # полоса прыгнула бы назад на второй фазе.
+            retry_total = progress_total() + retry_count
+            retry_progress = progress_total()
             if on_progress:
                 on_progress(
                     retry_progress,
@@ -679,6 +717,46 @@ class DocumentScanner:
             doc_read_method=settings.doc_read_method.value,
             cancelled=cancel_event.is_set(),
         )
+
+    @staticmethod
+    def _precount_files(
+        settings: ScanSettings,
+        size_limit: int,
+        cancel_event: Event,
+        on_progress: Optional[ProgressCallback],
+    ) -> int:
+        """Считает файлы, которые попадут в обработку, не открывая их.
+
+        Обход опирается на ``os.scandir`` и уже полученный им ``stat``, то есть
+        стоит примерно как одно построение списка каталога — несопоставимо с
+        чтением документов, OCR и запуском внешних конвертеров.
+
+        Фильтры совпадают с основным проходом, поэтому итог равен числу файлов,
+        которые действительно будут прочитаны. ``on_skip`` намеренно не
+        передаётся: пропуски учитывает основной проход, иначе статистика
+        удвоилась бы.
+
+        Возвращает 0, если подсчёт отменён — частичное число не должно стать
+        знаменателем прогресса.
+        """
+        counted = 0
+        if on_progress:
+            on_progress(0, 0, f"{PRECOUNT_MESSAGE}…")
+        for _entry in iter_files_safe(
+            settings.paths,
+            settings.file_types,
+            size_limit,
+            cancel_event=cancel_event,
+            include_empty=bool(settings.filename_words),
+        ):
+            counted += 1
+            # Не на каждый файл: обход быстрее, чем интерфейс успевает
+            # перерисовываться, и поток сообщений сам стал бы тормозом.
+            if on_progress and counted % _PRECOUNT_REPORT_EVERY == 0:
+                on_progress(0, 0, f"{PRECOUNT_MESSAGE}: {counted}")
+        if cancel_event.is_set():
+            return 0
+        return counted
 
     @staticmethod
     def _process_one_direct(entry: FileEntry, settings: ScanSettings):
