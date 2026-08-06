@@ -6,8 +6,10 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from html import escape
+from pathlib import Path
 from typing import Any, Iterable, List
 
 import re
@@ -31,6 +33,12 @@ _FILENAME_CONTEXT_PREFIX = "[Имя файла]"
 CONTENT_MATCH_COLOR = "#6AA1FF"
 FILENAME_MATCH_COLOR = "#F2A65A"
 _TOOLTIP_RESULT_LIMIT = 12
+# Разделитель между именем файла и уточняющей папкой. Имя идёт первым, чтобы
+# сортировка по столбцу «Файл» оставалась сортировкой по имени, а копии с
+# одинаковым именем оказывались рядом.
+_NAME_FOLDER_SEPARATOR = " › "
+# Глубже обычно не требуется: если различие лежит выше, показываем весь путь.
+_MAX_FOLDER_PARTS = 4
 
 # Пользовательские роли.
 MatchRole = Qt.UserRole + 1
@@ -60,6 +68,43 @@ class _ResultGroup:
 def is_filename_match(result: SearchResult) -> bool:
     """Возвращает True для результатов поиска только по названию файла."""
     return result.context.startswith(_FILENAME_CONTEXT_PREFIX)
+
+
+def _parent_tail(parent: Path, depth: int) -> str:
+    """Последние ``depth`` частей родительского пути."""
+    parts = parent.parts
+    if depth >= len(parts):
+        return str(parent)
+    return os.sep.join(parts[-depth:])
+
+
+def disambiguating_labels(file_name: str, paths: Iterable[str]) -> dict[str, str]:
+    """Подписи столбца «Файл» для одного имени файла.
+
+    Пока имя встречается в одном каталоге, подпись — само имя: обычный случай
+    ничего не теряет. Как только то же имя найдено во втором каталоге, строки
+    становятся неразличимы на вид, поэтому к имени добавляется минимальный
+    хвост родительского пути: сначала одна папка, при совпадении — две и так
+    далее. Если различие лежит выше ``_MAX_FOLDER_PARTS``, показывается весь
+    родительский путь.
+    """
+    unique = sorted(set(paths))
+    if len(unique) <= 1:
+        return {path: file_name for path in unique}
+
+    parents = {path: Path(path).parent for path in unique}
+    tails: dict[str, str] = {}
+    for depth in range(1, _MAX_FOLDER_PARTS + 1):
+        tails = {path: _parent_tail(parent, depth) for path, parent in parents.items()}
+        if len(set(tails.values())) == len(unique):
+            break
+    else:
+        tails = {path: str(parent) for path, parent in parents.items()}
+
+    return {
+        path: f"{file_name}{_NAME_FOLDER_SEPARATOR}{tail}"
+        for path, tail in tails.items()
+    }
 
 
 def _html_text(text: str) -> str:
@@ -193,10 +238,37 @@ class ResultsTableModel(QAbstractTableModel):
         self._groups: list[_ResultGroup] = []
         self._group_rows: dict[tuple[str, str], int] = {}
         self._all_results: list[SearchResult] = []
+        # Индексы для уточнения одинаковых имён файлов. Поддерживаются на
+        # лету: имя может стать неоднозначным уже после того, как его строки
+        # показаны, и тогда подписи нужно обновить, а не пересобирать таблицу.
+        self._paths_by_name: dict[str, set[str]] = {}
+        self._rows_by_name: dict[str, list[int]] = {}
+        self._label_by_path: dict[str, str] = {}
 
     @staticmethod
     def _key(result: SearchResult) -> tuple[str, str]:
         return result.full_path, result.word
+
+    def _register_row(self, row: int, result: SearchResult) -> str:
+        """Привязывает строку к имени файла и возвращает это имя."""
+        name = result.file_name
+        self._paths_by_name.setdefault(name, set()).add(result.full_path)
+        self._rows_by_name.setdefault(name, []).append(row)
+        return name
+
+    def _refresh_labels(self, names: Iterable[str]) -> set[str]:
+        """Пересчитывает подписи и возвращает имена, у которых они изменились."""
+        changed: set[str] = set()
+        for name in names:
+            labels = disambiguating_labels(name, self._paths_by_name.get(name, ()))
+            for path, label in labels.items():
+                if self._label_by_path.get(path) != label:
+                    self._label_by_path[path] = label
+                    changed.add(name)
+        return changed
+
+    def display_name(self, full_path: str, fallback: str) -> str:
+        return self._label_by_path.get(full_path, fallback)
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self._groups)
@@ -217,7 +289,7 @@ class ResultsTableModel(QAbstractTableModel):
         col = index.column()
         if role == Qt.DisplayRole:
             values = [
-                primary.file_name,
+                self.display_name(primary.full_path, primary.file_name),
                 primary.word,
                 len(group.results),
                 primary.context,
@@ -280,13 +352,22 @@ class ResultsTableModel(QAbstractTableModel):
                 self._groups[row].results.extend(incoming[key])
                 changed_rows.add(row)
 
+        touched_names: set[str] = set()
         if new_groups:
             start = len(self._groups)
             self.beginInsertRows(QModelIndex(), start, start + len(new_groups) - 1)
             for key, group in new_groups:
-                self._group_rows[key] = len(self._groups)
+                row = len(self._groups)
+                self._group_rows[key] = row
                 self._groups.append(group)
+                touched_names.add(self._register_row(row, group.results[0]))
             self.endInsertRows()
+
+        # Второй каталог для уже показанного имени делает прежние строки
+        # неразличимыми, поэтому подписи обновляются и у ранее вставленных.
+        for name in self._refresh_labels(touched_names):
+            for row in self._rows_by_name.get(name, ()):
+                changed_rows.add(row)
 
         for row in sorted(changed_rows):
             self.dataChanged.emit(
@@ -297,10 +378,16 @@ class ResultsTableModel(QAbstractTableModel):
 
     def clear(self) -> None:
         self.beginResetModel()
+        self._reset_state()
+        self.endResetModel()
+
+    def _reset_state(self) -> None:
         self._groups = []
         self._group_rows = {}
         self._all_results = []
-        self.endResetModel()
+        self._paths_by_name = {}
+        self._rows_by_name = {}
+        self._label_by_path = {}
 
     def result_at(self, row: int) -> SearchResult:
         return self._groups[row].primary
@@ -333,18 +420,21 @@ class ResultsTableModel(QAbstractTableModel):
         if len(remaining) == len(self._all_results):
             return
         self.beginResetModel()
-        self._groups = []
-        self._group_rows = {}
-        self._all_results = []
+        self._reset_state()
         for result in remaining:
             key = self._key(result)
             row = self._group_rows.get(key)
             if row is None:
-                self._group_rows[key] = len(self._groups)
+                row = len(self._groups)
+                self._group_rows[key] = row
                 self._groups.append(_ResultGroup(result.full_path, key[1], [result]))
+                self._register_row(row, result)
             else:
                 self._groups[row].results.append(result)
             self._all_results.append(result)
+        # Удаление файла может вернуть имени однозначность: уточнение папкой
+        # больше не нужно, и подпись снова становится просто именем.
+        self._refresh_labels(self._paths_by_name)
         self.endResetModel()
 
 

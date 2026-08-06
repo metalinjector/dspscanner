@@ -5,6 +5,7 @@ Qt — тогда рабочим остаётся только CLI-режим, �
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,123 @@ def test_results_model_clear_and_remove(qt_app):
     assert model.unique_paths() == ["/x/b.txt"]
     model.clear()
     assert model.rowCount() == 0
+
+
+def _name(model, row):
+    from PySide6.QtCore import Qt
+
+    return model.data(model.index(row, 0), Qt.DisplayRole)
+
+
+def _names(model):
+    return sorted(_name(model, row) for row in range(model.rowCount()))
+
+
+def test_unique_file_name_is_shown_as_is(qt_app):
+    """Обычный случай ничего не теряет: папка не приписывается."""
+    model = ResultsTableModel()
+    model.add_results([_result(name="besp.pdf")])
+    assert _names(model) == ["besp.pdf"]
+
+
+def test_same_name_in_two_folders_gets_the_parent_folder(qt_app):
+    """Иначе строки неразличимы: столбец «Путь» крайний справа и за экраном."""
+    model = ResultsTableModel()
+    model.add_results([
+        SearchResult("f.pdf", os.path.join(os.sep, "docs", "Отдел кадров", "f.pdf"),
+                     "беспилот*", "ctx", "pdf", "2026"),
+        SearchResult("f.pdf", os.path.join(os.sep, "docs", "Архив", "f.pdf"),
+                     "беспилот*", "ctx", "pdf", "2026"),
+    ])
+    assert _names(model) == ["f.pdf › Архив", "f.pdf › Отдел кадров"]
+
+
+def test_colliding_parent_folder_expands_to_two_levels(qt_app):
+    """Одной папки мало, когда совпадает и она."""
+    model = ResultsTableModel()
+    model.add_results([
+        SearchResult("f.pdf", os.path.join(os.sep, "docs", "Архив", "2024", "f.pdf"),
+                     "беспилот*", "ctx", "pdf", "2026"),
+        SearchResult("f.pdf", os.path.join(os.sep, "docs", "Копии", "2024", "f.pdf"),
+                     "беспилот*", "ctx", "pdf", "2026"),
+    ])
+    expected = sorted([
+        f"f.pdf › {os.path.join('Архив', '2024')}",
+        f"f.pdf › {os.path.join('Копии', '2024')}",
+    ])
+    assert _names(model) == expected
+
+
+def test_label_updates_when_the_second_folder_arrives_later(qt_app):
+    """Результаты приходят в GUI потоком: имя может стать неоднозначным потом."""
+    model = ResultsTableModel()
+    model.add_results([
+        SearchResult("f.pdf", os.path.join(os.sep, "docs", "A", "f.pdf"),
+                     "беспилот*", "ctx", "pdf", "2026"),
+    ])
+    assert _names(model) == ["f.pdf"]
+
+    changed = []
+    model.dataChanged.connect(lambda top, bottom, roles: changed.append(top.row()))
+    model.add_results([
+        SearchResult("f.pdf", os.path.join(os.sep, "docs", "B", "f.pdf"),
+                     "беспилот*", "ctx", "pdf", "2026"),
+    ])
+    assert _names(model) == ["f.pdf › A", "f.pdf › B"]
+    # Уже показанная строка обязана обновиться, иначе останется без папки.
+    assert 0 in changed
+
+
+def test_label_returns_to_plain_name_after_the_copy_is_removed(qt_app):
+    model = ResultsTableModel()
+    kept = os.path.join(os.sep, "docs", "A", "f.pdf")
+    removed = os.path.join(os.sep, "docs", "B", "f.pdf")
+    model.add_results([
+        SearchResult("f.pdf", kept, "беспилот*", "ctx", "pdf", "2026"),
+        SearchResult("f.pdf", removed, "беспилот*", "ctx", "pdf", "2026"),
+    ])
+    assert len(_names(model)) == 2
+
+    model.remove_paths({removed})
+    assert _names(model) == ["f.pdf"]
+
+
+def test_sorting_by_the_file_column_still_sorts_by_name(qt_app):
+    """Имя стоит первым, поэтому копии остаются рядом при сортировке."""
+    from app.gui.results_model import disambiguating_labels
+
+    labels = disambiguating_labels(
+        "f.pdf",
+        [os.path.join(os.sep, "z", "f.pdf"), os.path.join(os.sep, "a", "f.pdf")],
+    )
+    assert all(label.startswith("f.pdf") for label in labels.values())
+
+
+def test_disambiguation_falls_back_to_the_full_parent_path(qt_app):
+    """Когда различие лежит выше предела уточнения, показываем весь путь."""
+    from app.gui.results_model import disambiguating_labels
+
+    deep_a = os.path.join(os.sep, "root_a", "p1", "p2", "p3", "p4", "f.pdf")
+    deep_b = os.path.join(os.sep, "root_b", "p1", "p2", "p3", "p4", "f.pdf")
+    labels = disambiguating_labels("f.pdf", [deep_a, deep_b])
+    assert len(set(labels.values())) == 2
+    assert any("root_a" in label for label in labels.values())
+
+
+def test_path_column_is_untouched(qt_app):
+    """Полный путь остаётся ровно тем, что на диске: по нему открывают файл."""
+    from PySide6.QtCore import Qt
+
+    model = ResultsTableModel()
+    first = os.path.join(os.sep, "docs", "A", "f.pdf")
+    second = os.path.join(os.sep, "docs", "B", "f.pdf")
+    model.add_results([
+        SearchResult("f.pdf", first, "беспилот*", "ctx", "pdf", "2026"),
+        SearchResult("f.pdf", second, "беспилот*", "ctx", "pdf", "2026"),
+    ])
+    shown = {model.data(model.index(row, 6), Qt.DisplayRole) for row in range(model.rowCount())}
+    assert shown == {first, second}
+    assert set(model.unique_paths()) == {first, second}
 
 
 def test_filename_matches_are_distinguishable(qt_app):
