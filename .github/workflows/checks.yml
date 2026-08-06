@@ -1,0 +1,80 @@
+name: Проверка сборки
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    # Windows — целевая платформа приложения (MS Word COM, диски, ярлыки),
+    # Linux — режим headless-сервера из requirements_cli.txt.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Системные библиотеки Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: ruff
+        run: python -m ruff check .
+
+      - name: compileall
+        run: python -m compileall -q app main.py
+
+      - name: pytest
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest
+
+  headless-cli:
+    # Отдельно проверяем, что серверный режим действительно живёт без PySide6:
+    # ни один импорт Qt не должен просочиться в путь --cli.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Только headless-набор зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements_cli.txt
+
+      - name: PySide6 не установлен
+        run: python -c "import importlib.util,sys; sys.exit(1) if importlib.util.find_spec('PySide6') else print('PySide6 отсутствует, как и требуется')"
+
+      - name: Сканирование через CLI без GUI
+        run: |
+          mkdir -p /tmp/docs
+          printf 'Служебная записка о договоре № 42\n' > /tmp/docs/a.txt
+          python main.py --cli --no-config --path /tmp/docs \
+            --content-terms 'договор' --types txt \
+            --format csv --output /tmp/report.csv --summary-json /tmp/summary.json
+          test -s /tmp/report.csv
+          python -c "import json;s=json.load(open('/tmp/summary.json'));assert s['matches']==1,s;print('CLI-режим работает:',s)"

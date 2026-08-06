@@ -1,0 +1,8 @@
+# DSP Scanner — зависимости для проверки сборки на новой машине.
+# Установка:  python -m pip install -r requirements.txt -r requirements-dev.txt
+# Запуск:     python -m pytest
+
+-r requirements.txt
+
+pytest>=8.0
+ruff>=0.6
