@@ -39,6 +39,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPainter,
     QClipboard,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -78,6 +79,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QSpacerItem,
     QSizePolicy,
+    QTextBrowser,
 )
 
 from app.config import (
@@ -519,30 +521,66 @@ class MainWindow(QMainWindow):
     def _show_help(self, title: str, text: str) -> None:
         """Показывает пояснение.
 
-        QMessageBox по умолчанию подгоняет ширину под содержимое, и длинный
-        текст вытягивается в узкий столбик. Растяжка в сетке задаёт минимальную
-        ширину, чтобы строки были нормальной длины; текст с разметкой
-        отображается как форматированный, простой — как обычный абзац.
+        Короткие подсказки идут обычным QMessageBox. Длинный размеченный текст
+        он показать не может: прокрутки у него нет, и содержимое, не влезающее
+        на экран, просто обрезается. Поэтому для разметки собирается диалог с
+        QTextBrowser — с прокруткой, выделением и переходом по ссылкам.
         """
-        box = QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setIcon(QMessageBox.Icon.Information)
+        self._build_help_dialog(title, text).exec()
+
+    def _build_help_dialog(self, title: str, text: str) -> QDialog:
+        """Собирает окно пояснения, но не показывает его.
+
+        Отделено от показа, чтобы вёрстку можно было проверить тестами:
+        exec() блокирует поток до закрытия окна.
+        """
         looks_like_markup = "<" in text and ">" in text
-        box.setTextFormat(
-            Qt.TextFormat.RichText if looks_like_markup else Qt.TextFormat.AutoText
-        )
-        box.setText(text)
-        box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        layout = box.layout()
-        if layout is not None:
-            spacer = QSpacerItem(
-                520 if looks_like_markup else 380,
-                0,
-                QSizePolicy.Policy.Minimum,
-                QSizePolicy.Policy.Expanding,
+        if not looks_like_markup:
+            box = QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setTextFormat(Qt.TextFormat.AutoText)
+            box.setText(text)
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            layout = box.layout()
+            if layout is not None:
+                spacer = QSpacerItem(
+                    380, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding
+                )
+                layout.addItem(spacer, layout.rowCount(), 0, 1, layout.columnCount())
+            return box
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        view = QTextBrowser(dialog)
+        view.setObjectName("helpBrowser")
+        view.setOpenExternalLinks(True)
+        view.setHtml(text)
+        # Читать удобнее с самого начала: setHtml оставляет курсор в конце.
+        view.moveCursor(QTextCursor.MoveOperation.Start)
+        view.verticalScrollBar().setValue(0)
+        layout.addWidget(view, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        # Высота по содержимому, но не выше экрана — иначе кнопка «ОК»
+        # уезжает за его границу и диалог нечем закрыть мышью.
+        dialog.resize(600, 640)
+        screen = dialog.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            dialog.resize(
+                min(600, available.width() - 80),
+                min(640, available.height() - 80),
             )
-            layout.addItem(spacer, layout.rowCount(), 0, 1, layout.columnCount())
-        box.exec()
+        return dialog
 
     def _section_header(self, text: str, help_title: str, help_text: str) -> QWidget:
         header = QWidget()

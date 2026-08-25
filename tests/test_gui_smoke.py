@@ -1358,47 +1358,81 @@ def test_terms_dialog_shows_ruled_lines_when_empty(qt_app):
     dialog.list.grab()
 
 
-def test_secure_erase_help_is_formatted_as_rich_text(window, monkeypatch):
-    """Пояснение о безопасном удалении показывается размеченным.
+def test_secure_erase_help_is_scrollable(window):
+    """Длинное пояснение можно прокрутить до конца.
 
-    Текст длинный и структурный. Если Qt покажет его как обычную строку,
-    пользователь увидит сырые теги вместо заголовков и списков.
+    Текст не помещается в окно целиком. QMessageBox прокрутки не имеет и
+    просто обрезал бы конец — вместе с советами про шифрование диска.
     """
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QTextBrowser
 
     from app.gui.main_window import _SECURE_ERASE_HELP
 
-    captured = {}
+    dialog = window._build_help_dialog(
+        "Что делает безопасное удаление", _SECURE_ERASE_HELP
+    )
+    try:
+        dialog.show()
+        browser = dialog.findChild(QTextBrowser)
+        assert browser is not None, "пояснение показано без прокручиваемой области"
 
-    def fake_exec(self):
-        captured["format"] = self.textFormat()
-        captured["text"] = self.text()
-        captured["title"] = self.windowTitle()
-        return QMessageBox.StandardButton.Ok
+        scrollbar = browser.verticalScrollBar()
+        assert scrollbar.maximum() > 0, "текст влез целиком — прокрутка не проверена"
+        # Открывается с начала, а не с середины текста.
+        assert scrollbar.value() == 0
 
-    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
-    window._show_help("Что делает безопасное удаление", _SECURE_ERASE_HELP)
+        scrollbar.setValue(scrollbar.maximum())
+        assert scrollbar.value() == scrollbar.maximum()
 
-    assert captured["format"] == Qt.TextFormat.RichText
-    assert captured["title"] == "Что делает безопасное удаление"
-    # Ключевые предупреждения должны остаться в тексте.
-    assert "SSD" in captured["text"]
-    assert "NIST SP 800-88" in captured["text"]
+        # Конец текста действительно достижим.
+        assert "чипы памяти" in browser.toPlainText()
+    finally:
+        dialog.deleteLater()
 
 
-def test_plain_help_text_is_not_forced_into_rich_text(window, monkeypatch):
-    """Обычные подсказки без разметки показываются как прежде."""
+def test_secure_erase_help_renders_markup_not_raw_tags(window):
+    """Разметка отображается как форматирование, а не как теги в тексте."""
+    from PySide6.QtWidgets import QTextBrowser
+
+    from app.gui.main_window import _SECURE_ERASE_HELP
+
+    dialog = window._build_help_dialog("Заголовок", _SECURE_ERASE_HELP)
+    try:
+        browser = dialog.findChild(QTextBrowser)
+        plain = browser.toPlainText()
+
+        assert "<h3>" not in plain and "<li>" not in plain
+        # Ключевые предупреждения на месте.
+        assert "SSD" in plain
+        assert "NIST SP 800-88" in plain
+    finally:
+        dialog.deleteLater()
+
+
+def test_help_dialog_fits_on_small_screens(window):
+    """Окно не должно оказаться выше экрана: иначе «ОК» недостижим."""
+    from PySide6.QtWidgets import QApplication
+
+    from app.gui.main_window import _SECURE_ERASE_HELP
+
+    dialog = window._build_help_dialog("Заголовок", _SECURE_ERASE_HELP)
+    try:
+        available = (dialog.screen() or QApplication.primaryScreen()).availableGeometry()
+
+        assert dialog.height() <= available.height()
+        assert dialog.width() <= available.width()
+    finally:
+        dialog.deleteLater()
+
+
+def test_plain_help_text_is_not_forced_into_rich_text(window):
+    """Короткие подсказки остаются обычным окном сообщения."""
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QMessageBox
 
-    captured = {}
-
-    def fake_exec(self):
-        captured["format"] = self.textFormat()
-        return QMessageBox.StandardButton.Ok
-
-    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
-    window._show_help("Размер, МБ", "Максимальный размер одного файла.")
-
-    assert captured["format"] == Qt.TextFormat.AutoText
+    dialog = window._build_help_dialog("Размер, МБ", "Максимальный размер файла.")
+    try:
+        assert isinstance(dialog, QMessageBox)
+        assert dialog.textFormat() == Qt.TextFormat.AutoText
+    finally:
+        dialog.deleteLater()

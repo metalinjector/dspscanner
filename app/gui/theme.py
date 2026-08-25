@@ -259,6 +259,14 @@ QScrollArea#termsTooltipArea {{
 QDialog#termsDialog {{
     background-color: {BG_DARK};
 }}
+
+/* Пояснение по кнопке «?»: текст для чтения, а не поле ввода — рамка и
+   фон ввода здесь только мешали бы. */
+QTextBrowser#helpBrowser {{
+    background: transparent;
+    border: none;
+    padding: 0 6px 0 0;
+}}
 QLabel#termsDialogHint, QLabel#termsDialogSummary {{
     color: {TEXT_MUTED};
     font-weight: 500;
