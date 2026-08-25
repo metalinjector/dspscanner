@@ -31,8 +31,23 @@ class ResultContextsDialog(QDialog):
         self.results = list(results)
         primary = self.results[0] if self.results else None
         title = "Все контексты совпадений"
+        # Из «Результатов» приходит один термин, из «Файлов» — все термины
+        # файла сразу, поэтому заголовок перечисляет то, что есть.
+        words: list[str] = []
+        seen: set[str] = set()
+        for result in self.results:
+            key = result.word.casefold()
+            if key not in seen:
+                seen.add(key)
+                words.append(result.word)
         if primary is not None:
-            title = f"Совпадения «{primary.word}» — {primary.file_name}"
+            if len(words) == 1:
+                title = f"Совпадения «{words[0]}» — {primary.file_name}"
+            else:
+                listed = ", ".join(f"«{word}»" for word in words[:4])
+                if len(words) > 4:
+                    listed += f" и ещё {len(words) - 4}"
+                title = f"Совпадения {listed} — {primary.file_name}"
         self.setWindowTitle(title)
         self.resize(940, 700)
         self.setMinimumSize(700, 480)
@@ -67,6 +82,10 @@ class ResultContextsDialog(QDialog):
             )
             matched = result.matched_text or result.word
             source_label = "название файла" if filename_match else "содержимое файла"
+            # Когда карточки относятся к разным терминам (вызов из «Файлов»),
+            # без имени термина непонятно, что именно найдено.
+            if len(words) > 1:
+                source_label = f"«{result.word}», {source_label}"
 
             card = QFrame(content)
             card.setObjectName("contextCard")

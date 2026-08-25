@@ -124,6 +124,8 @@ from app.scan_config_store import (
 _CHECK_COLUMN_INDEX = 0
 _OCCURENCES_COLUMN_INDEX = 3
 _CONTEXT_COLUMN_INDEX = 4
+# FilesTableModel повторяет ту же раскладку, поэтому индексы общие для обеих
+# вкладок: делегаты, автоподгонка и обработчики кликов переиспользуются.
 _CONTEXT_COLUMN_MIN_WIDTH = 260
 _CONTEXT_COLUMN_MAX_WIDTH = 900
 # Поля ячейки в делегате подсветки плюс запас на полужирные фрагменты
@@ -251,6 +253,10 @@ class MainWindow(QMainWindow):
         # обработчик sectionResized подключается уже там.
         self._context_column_user_sized = False
         self._adjusting_context_column = False
+        # Те же флаги для одноимённой колонки вкладки «Файлы»: подгонка у
+        # таблиц независимая, ширины пользователь настраивает раздельно.
+        self._files_context_column_user_sized = False
+        self._adjusting_files_context_column = False
         self._restoring_scan_config = True
         self._updating_paths_programmatically = False
         self._paths_mode = "custom"
@@ -878,16 +884,32 @@ class MainWindow(QMainWindow):
         self.results_secure_move_btn.clicked.connect(
             self._results_secure_move_checked
         )
-        for b in (
-            results_select_all_btn,
-            results_clear_all_btn,
-            self.results_secure_delete_btn,
-            self.results_secure_move_btn,
-        ):
+        self.results_copy_btn = QPushButton("Скопировать отмеченные…")
+        self.results_copy_btn.setToolTip(
+            "Скопировать файлы отмеченных строк в выбранную папку; "
+            "оригиналы остаются на месте"
+        )
+        self.results_copy_btn.clicked.connect(self._results_copy_checked)
+        # Пять кнопок в один ряд не помещаются на узком окне и обрезаются:
+        # отметка слева, операции над отмеченными — во втором ряду.
+        for b in (results_select_all_btn, results_clear_all_btn):
             b.setMinimumHeight(32)
             results_select_row.addWidget(b)
         results_select_row.addStretch(1)
         layout.addLayout(results_select_row)
+
+        results_ops_row = QHBoxLayout()
+        results_ops_row.setContentsMargins(0, 2, 0, 0)
+        results_ops_row.setSpacing(8)
+        for b in (
+            self.results_copy_btn,
+            self.results_secure_move_btn,
+            self.results_secure_delete_btn,
+        ):
+            b.setMinimumHeight(32)
+            results_ops_row.addWidget(b)
+        results_ops_row.addStretch(1)
+        layout.addLayout(results_ops_row)
 
         export_row = QHBoxLayout()
         export_row.setContentsMargins(0, 6, 0, 4)
@@ -924,11 +946,12 @@ class MainWindow(QMainWindow):
 
         info_label = QLabel(
             "Найденные файлы появляются здесь сразу во время сканирования — "
-            "по одной строке на файл, с количеством совпадений, контекстом, "
-            "типом и датой изменения, как во вкладке «Результаты». "
-            "Наведите курсор, чтобы увидеть расширенные фрагменты. "
-            "Отметьте нужные файлы галочками слева — копирование и безопасные "
-            "операции работают по отмеченным."
+            "по одной строке на файл, с найденными словами, количеством "
+            "совпадений, контекстом, типом и датой изменения, как во вкладке "
+            "«Результаты». Совпадения подсвечены, число в столбце «Кол-во "
+            "совпадений» открывает все контексты файла. Наведите курсор, чтобы "
+            "увидеть расширенные фрагменты. Отметьте нужные файлы галочками "
+            "слева — копирование и безопасные операции работают по отмеченным."
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: #9AA3B2; padding: 4px;")
@@ -971,9 +994,22 @@ class MainWindow(QMainWindow):
         files_header = self.found_files_table.horizontalHeader()
         files_header.setSectionResizeMode(QHeaderView.Interactive)
         files_header.setStretchLastSection(False)
-        for index, width in enumerate((34, 320, 90, 420, 80, 155, 380)):
+        for index, width in enumerate(
+            (34, 320, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 380)
+        ):
             self.found_files_table.setColumnWidth(index, width)
+        # Автоподгонка «Контекста» работает по тем же правилам, что и в
+        # «Результатах», и так же отключается ручным перетаскиванием границы.
+        files_header.sectionResized.connect(self._on_files_section_resized)
+
         self.found_files_table.setItemDelegateForColumn(0, CheckboxDelegate(self))
+        self.found_files_table.setItemDelegateForColumn(
+            1, HighlightDelegate(filename_column=True)
+        )
+        self.found_files_table.setItemDelegateForColumn(
+            _CONTEXT_COLUMN_INDEX, HighlightDelegate()
+        )
+        self.found_files_table.clicked.connect(self._on_files_table_clicked)
         self.found_files_table.doubleClicked.connect(
             self._open_found_file_row
         )
@@ -1676,6 +1712,14 @@ class MainWindow(QMainWindow):
         if index == _CONTEXT_COLUMN_INDEX and not self._adjusting_context_column:
             self._context_column_user_sized = True
 
+    def _on_files_section_resized(self, index: int, _old: int, _new: int) -> None:
+        """Ручная ширина «Контекста» во вкладке «Файлы» отключает автоподгонку."""
+        if (
+            index == _CONTEXT_COLUMN_INDEX
+            and not self._adjusting_files_context_column
+        ):
+            self._files_context_column_user_sized = True
+
     def _auto_fit_context_column(self) -> None:
         """Подгоняет «Контекст» под самую длинную строку столбца.
 
@@ -1689,11 +1733,7 @@ class MainWindow(QMainWindow):
         longest = self.results_model.longest_context()
         if not longest:
             return
-        width = self.results_table.fontMetrics().horizontalAdvance(longest)
-        width = max(
-            _CONTEXT_COLUMN_MIN_WIDTH,
-            min(_CONTEXT_COLUMN_MAX_WIDTH, width + _CONTEXT_COLUMN_PADDING),
-        )
+        width = self._fitted_context_width(self.results_table, longest)
         if width == self.results_table.columnWidth(_CONTEXT_COLUMN_INDEX):
             return
         self._adjusting_context_column = True
@@ -1701,6 +1741,31 @@ class MainWindow(QMainWindow):
             self.results_table.setColumnWidth(_CONTEXT_COLUMN_INDEX, width)
         finally:
             self._adjusting_context_column = False
+
+    def _auto_fit_files_context_column(self) -> None:
+        """То же для вкладки «Файлы»: колонки одинаковые, правила общие."""
+        if self._files_context_column_user_sized:
+            return
+        longest = self.files_model.longest_context()
+        if not longest:
+            return
+        width = self._fitted_context_width(self.found_files_table, longest)
+        if width == self.found_files_table.columnWidth(_CONTEXT_COLUMN_INDEX):
+            return
+        self._adjusting_files_context_column = True
+        try:
+            self.found_files_table.setColumnWidth(_CONTEXT_COLUMN_INDEX, width)
+        finally:
+            self._adjusting_files_context_column = False
+
+    @staticmethod
+    def _fitted_context_width(table, longest: str) -> int:
+        """Общая формула ширины «Контекста» для обеих таблиц."""
+        width = table.fontMetrics().horizontalAdvance(longest)
+        return max(
+            _CONTEXT_COLUMN_MIN_WIDTH,
+            min(_CONTEXT_COLUMN_MAX_WIDTH, width + _CONTEXT_COLUMN_PADDING),
+        )
 
     def _update_scan_timer(self) -> None:
         """Обновляет карточку 'Время сканирования' в реальном времени."""
@@ -1846,6 +1911,16 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         select_all_action = menu.addAction("Выделить все совпадения в этом файле")
         check_file_action = menu.addAction("Отметить все строки этого файла галочкой")
+        menu.addSeparator()
+        # Операции над отмеченными доступны и без выделенной строки: они
+        # работают по галочкам, а не по текущему курсору.
+        copy_checked_action = menu.addAction("Скопировать отмеченные…")
+        secure_move_action = menu.addAction("Безопасно переместить отмеченные…")
+        secure_delete_action = menu.addAction("Безопасно удалить отмеченные")
+
+        has_checked = self.results_model.has_checked()
+        for a in (copy_checked_action, secure_move_action, secure_delete_action):
+            a.setEnabled(has_checked)
 
         if result is None:
             for a in (
@@ -1860,6 +1935,16 @@ class MainWindow(QMainWindow):
 
         action = menu.exec(self.results_table.viewport().mapToGlobal(position))
         if action is None:
+            return
+
+        if action == copy_checked_action:
+            self._results_copy_checked()
+            return
+        if action == secure_move_action:
+            self._results_secure_move_checked()
+            return
+        if action == secure_delete_action:
+            self._results_secure_delete_checked()
             return
 
         if action == open_file_action and result:
@@ -1993,26 +2078,47 @@ class MainWindow(QMainWindow):
     def _populate_found_files(self) -> None:
         """Синхронизирует таблицу «Файлы» с моделью результатов."""
         self.files_model.sync_with_results(self.results_model)
+        self._auto_fit_files_context_column()
         self._update_files_tab_title()
+
+    def _on_files_table_clicked(self, proxy_index) -> None:
+        """Открывает все контексты файла при нажатии на число совпадений."""
+        if not proxy_index.isValid() or proxy_index.column() != _OCCURENCES_COLUMN_INDEX:
+            return
+        source = self.files_proxy_model.mapToSource(proxy_index)
+        if not source.isValid():
+            return
+        results = self.files_model.group_results_at(source.row())
+        if results:
+            ResultContextsDialog(results, self).exec()
 
     def _open_found_file_row(self, proxy_index=None) -> None:
         if proxy_index is None or not proxy_index.isValid():
             return
-        if proxy_index.column() == 0:
+        # Двойной щелчок по галочке или счётчику не должен открывать файл —
+        # ровно как во вкладке «Результаты».
+        if proxy_index.column() in (_CHECK_COLUMN_INDEX, _OCCURENCES_COLUMN_INDEX):
             return
         source = self.files_proxy_model.mapToSource(proxy_index)
         if not source.isValid():
             return
         self._open_path(self.files_model.path_at_source(source.row()))
 
-    def _current_found_result(self):
+    def _current_found_source_row(self):
+        """Строка выделенного файла в исходной модели (не в прокси)."""
         indexes = self.found_files_table.selectionModel().selectedRows()
         if not indexes:
             return None
         source = self.files_proxy_model.mapToSource(indexes[0])
         if not source.isValid():
             return None
-        return self.files_model.primary_at_source(source.row())
+        return source.row()
+
+    def _current_found_result(self):
+        row = self._current_found_source_row()
+        if row is None:
+            return None
+        return self.files_model.primary_at_source(row)
 
     def _show_files_context_menu(self, position) -> None:
         result = self._current_found_result()
@@ -2021,13 +2127,45 @@ class MainWindow(QMainWindow):
         open_folder_action = menu.addAction("Открыть папку файла")
         menu.addSeparator()
         copy_path_action = menu.addAction("Копировать полный путь")
+        copy_context_action = menu.addAction("Копировать контекст")
+        show_contexts_action = menu.addAction("Показать все контексты файла…")
+        menu.addSeparator()
+        check_file_action = menu.addAction("Отметить этот файл галочкой")
+        menu.addSeparator()
+        copy_checked_action = menu.addAction("Скопировать отмеченные…")
+        secure_move_action = menu.addAction("Безопасно переместить отмеченные…")
+        secure_delete_action = menu.addAction("Безопасно удалить отмеченные")
+
+        has_checked = bool(self.files_model.checked_paths())
+        for a in (copy_checked_action, secure_move_action, secure_delete_action):
+            a.setEnabled(has_checked)
+
+        actions = (
+            open_file_action,
+            open_folder_action,
+            copy_path_action,
+            copy_context_action,
+            show_contexts_action,
+            check_file_action,
+        )
         if result is None:
-            for a in (open_file_action, open_folder_action, copy_path_action):
+            for a in actions:
                 a.setEnabled(False)
         action = menu.exec(
             self.found_files_table.viewport().mapToGlobal(position)
         )
-        if action is None or result is None:
+        if action is None:
+            return
+        if action == copy_checked_action:
+            self._copy_checked(self._FILES_ORIGIN)
+            return
+        if action == secure_move_action:
+            self._secure_move_selected()
+            return
+        if action == secure_delete_action:
+            self._secure_delete_selected()
+            return
+        if result is None:
             return
         if action == open_file_action:
             self._open_path(result.full_path)
@@ -2038,6 +2176,20 @@ class MainWindow(QMainWindow):
                 result.full_path, QClipboard.Clipboard
             )
             self.status_bar.showMessage("Путь скопирован в буфер обмена")
+        elif action == copy_context_action:
+            QApplication.clipboard().setText(result.context, QClipboard.Clipboard)
+            self.status_bar.showMessage("Контекст скопирован в буфер обмена")
+        elif action == show_contexts_action:
+            row = self._current_found_source_row()
+            if row is not None:
+                results = self.files_model.group_results_at(row)
+                if results:
+                    ResultContextsDialog(results, self).exec()
+        elif action == check_file_action:
+            row = self._current_found_source_row()
+            if row is not None:
+                index = self.files_model.index(row, _CHECK_COLUMN_INDEX)
+                self.files_model.setData(index, Qt.Checked, Qt.CheckStateRole)
 
     def _update_files_tab_title(self) -> None:
         """Число найденных файлов видно на самой вкладке, не только по её содержимому."""
@@ -2055,39 +2207,11 @@ class MainWindow(QMainWindow):
             self.copy_dest_edit.setText(folder)
 
     def _copy_found_files(self) -> None:
-        if any(
-            worker is not None and worker.isRunning()
-            for worker in (
-                self.copy_worker,
-                self.secure_worker,
-                self.error_copy_worker,
-                self.error_secure_worker,
-            )
-        ):
-            QMessageBox.information(
-                self, "Копирование", "Другая файловая операция уже выполняется."
-            )
-            return
-        paths = self._checked_found_paths()
-        if not paths:
-            QMessageBox.information(
-                self, "Нет отмеченных файлов", "Отметьте файлы чекбоксами слева."
-            )
-            return
-        destination = self.copy_dest_edit.text().strip()
-        if not destination:
-            QMessageBox.warning(self, "Не указан путь", "Укажите папку назначения.")
-            return
-
-        self.copy_worker = CopyWorker(paths, destination)
-        self.copy_worker.finished_ok.connect(self._on_copy_finished)
-        self.copy_worker.failed.connect(self._on_copy_failed)
-        self.copy_btn.setEnabled(False)
-        self.status_bar.showMessage("Копирование отмеченных файлов…")
-        self.copy_worker.start()
+        """Копирование по кнопке вкладки «Файлы»: папка берётся из поля."""
+        self._copy_checked(self._FILES_ORIGIN, self.copy_dest_edit.text())
 
     def _on_copy_finished(self, mappings: List[CopyMapping]) -> None:
-        self.copy_btn.setEnabled(True)
+        self._set_secure_controls_enabled(True)
         self.copy_mappings = mappings
         self.status_bar.showMessage(f"Скопировано файлов: {len(mappings)}")
         QMessageBox.information(
@@ -2099,105 +2223,167 @@ class MainWindow(QMainWindow):
         self._maybe_close_after_workers()
 
     def _on_copy_failed(self, message: str) -> None:
-        self.copy_btn.setEnabled(True)
+        self._set_secure_controls_enabled(True)
         QMessageBox.critical(self, "Ошибка копирования", message)
         self._maybe_close_after_workers()
 
-    def _secure_delete_selected(self) -> None:
-        if any(
-            worker is not None and worker.isRunning()
-            for worker in (
-                self.copy_worker,
-                self.secure_worker,
-                self.error_copy_worker,
-                self.error_secure_worker,
+    # -- Единый конвейер безопасных операций -------------------------- #
+    #
+    # Обе вкладки работают по одному сценарию: собрать отмеченные пути,
+    # проверить занятость воркеров, подтвердить и запустить SecureOpWorker.
+    # Раньше сценарий был скопирован четырежды, и правки расходились.
+
+    _FILES_ORIGIN = "files"
+    _RESULTS_ORIGIN = "results"
+
+    def _origin_titles(self, origin: str) -> tuple[str, str]:
+        """Заголовок и текст предупреждения о пустом выборе для вкладки."""
+        if origin == self._RESULTS_ORIGIN:
+            return (
+                "Нет отмеченных строк",
+                "Отметьте строки результатов галочками слева.",
             )
-        ):
+        return ("Нет отмеченных файлов", "Отметьте файлы чекбоксами слева.")
+
+    def _checked_paths_for(self, origin: str) -> List[str]:
+        if origin == self._RESULTS_ORIGIN:
+            return self.results_model.checked_paths()
+        return self.files_model.checked_paths()
+
+    def _collect_checked_paths(self, origin: str) -> Optional[List[str]]:
+        """Отмеченные пути вкладки; None — операцию начинать нельзя."""
+        if self._file_op_running():
             QMessageBox.information(
                 self, "Операция", "Файловая операция уже выполняется."
             )
-            return
-        paths = self._checked_found_paths()
+            return None
+        paths = self._checked_paths_for(origin)
         if not paths:
-            QMessageBox.information(
-                self, "Нет отмеченных файлов", "Отметьте файлы чекбоксами слева."
-            )
+            title, text = self._origin_titles(origin)
+            QMessageBox.information(self, title, text)
+            return None
+        return paths
+
+    def _origin_phrase(self, origin: str, count: int) -> str:
+        if origin == self._RESULTS_ORIGIN:
+            return f"{count} файлов, отмеченных во вкладке «Результаты»,"
+        return f"{count} отмеченных файлов"
+
+    def _start_secure_operation(
+        self, mode: str, paths: List[str], destination: str | None = None
+    ) -> None:
+        """Запускает SecureOpWorker и блокирует органы управления."""
+        action = "перемещено" if mode == "move" else "удалено"
+        self.secure_worker = SecureOpWorker(
+            mode,
+            paths,
+            destination or "",
+            passes=load_settings().secure_passes,
+        )
+        self.secure_worker.finished_ok.connect(
+            lambda result: self._on_secure_finished(action, result)
+        )
+        self.secure_worker.failed.connect(self._on_secure_failed)
+        self._set_secure_controls_enabled(False)
+        self.status_bar.showMessage(
+            "Безопасное перемещение отмеченных файлов…"
+            if mode == "move"
+            else "Безопасное удаление отмеченных файлов…"
+        )
+        self.secure_worker.start()
+
+    def _secure_delete_checked(self, origin: str) -> None:
+        paths = self._collect_checked_paths(origin)
+        if paths is None:
             return
         confirm = QMessageBox.question(
             self,
             "Необратимое удаление",
-            f"Безопасно удалить {len(paths)} отмеченных файлов?\n\n"
+            f"Безопасно удалить {self._origin_phrase(origin, len(paths))}?\n\n"
             "Оригиналы будут многократно перезаписаны и удалены. Действие необратимо.",
         )
         if confirm != QMessageBox.Yes:
             return
-        from app.settings_store import load_settings
+        self._start_secure_operation("delete", paths)
 
-        self.secure_worker = SecureOpWorker(
-            "delete", paths, passes=load_settings().secure_passes
-        )
-        self.secure_worker.finished_ok.connect(
-            lambda result: self._on_secure_finished("удалено", result)
-        )
-        self.secure_worker.failed.connect(self._on_secure_failed)
-        self._set_secure_controls_enabled(False)
-        self.secure_worker.start()
-
-    def _secure_move_selected(self) -> None:
-        if any(
-            worker is not None and worker.isRunning()
-            for worker in (
-                self.copy_worker,
-                self.secure_worker,
-                self.error_copy_worker,
-                self.error_secure_worker,
-            )
-        ):
-            QMessageBox.information(
-                self, "Операция", "Файловая операция уже выполняется."
-            )
-            return
-        paths = self._checked_found_paths()
-        if not paths:
-            QMessageBox.information(
-                self, "Нет отмеченных файлов", "Отметьте файлы чекбоксами слева."
-            )
+    def _secure_move_checked(self, origin: str) -> None:
+        paths = self._collect_checked_paths(origin)
+        if paths is None:
             return
         destination = QFileDialog.getExistingDirectory(
-            self, "Куда безопасно переместить файлы"
+            self, "Куда безопасно переместить файлы", self.copy_dest_edit.text().strip()
         )
         if not destination:
             return
         confirm = QMessageBox.question(
             self,
             "Безопасное перемещение",
-            f"Переместить {len(paths)} отмеченных файлов в:\n{destination}\n\n"
+            f"Переместить {self._origin_phrase(origin, len(paths))} в:\n{destination}\n\n"
             "Сначала будет создана новая копия, затем оригинал будет многократно "
             "перезаписан и удалён с прежнего места.",
         )
         if confirm != QMessageBox.Yes:
             return
-        from app.settings_store import load_settings
+        self._start_secure_operation("move", paths, destination)
 
-        self.secure_worker = SecureOpWorker(
-            "move",
-            paths,
-            destination,
-            passes=load_settings().secure_passes,
-        )
-        self.secure_worker.finished_ok.connect(
-            lambda result: self._on_secure_finished("перемещено", result)
-        )
-        self.secure_worker.failed.connect(self._on_secure_failed)
+    def _copy_checked(self, origin: str, destination: str | None = None) -> None:
+        """Копирование отмеченных файлов вкладки в выбранную папку."""
+        paths = self._collect_checked_paths(origin)
+        if paths is None:
+            return
+        if destination is None:
+            destination = QFileDialog.getExistingDirectory(
+                self,
+                "Папка назначения для копирования",
+                self.copy_dest_edit.text().strip(),
+            )
+            if not destination:
+                return
+            # Обе вкладки используют одно поле назначения: выбор из
+            # «Результатов» подхватывается кнопкой копирования во «Файлах».
+            self.copy_dest_edit.setText(destination)
+        destination = destination.strip()
+        if not destination:
+            QMessageBox.warning(self, "Не указан путь", "Укажите папку назначения.")
+            return
+
+        self.copy_worker = CopyWorker(paths, destination)
+        self.copy_worker.finished_ok.connect(self._on_copy_finished)
+        self.copy_worker.failed.connect(self._on_copy_failed)
         self._set_secure_controls_enabled(False)
-        self.secure_worker.start()
+        self.status_bar.showMessage("Копирование отмеченных файлов…")
+        self.copy_worker.start()
+
+    # Точки входа вкладки «Файлы».
+    def _secure_delete_selected(self) -> None:
+        self._secure_delete_checked(self._FILES_ORIGIN)
+
+    def _secure_move_selected(self) -> None:
+        self._secure_move_checked(self._FILES_ORIGIN)
+
+    # Точки входа вкладки «Результаты».
+    def _results_secure_delete_checked(self) -> None:
+        """Безопасное удаление из вкладки «Результаты» по галочкам."""
+        self._secure_delete_checked(self._RESULTS_ORIGIN)
+
+    def _results_secure_move_checked(self) -> None:
+        """Безопасное перемещение из вкладки «Результаты» по галочкам."""
+        self._secure_move_checked(self._RESULTS_ORIGIN)
+
+    def _results_copy_checked(self) -> None:
+        """Копирование отмеченных строк «Результатов» в выбранную папку."""
+        self._copy_checked(self._RESULTS_ORIGIN)
 
     def _set_secure_controls_enabled(self, enabled: bool) -> None:
-        self.secure_delete_btn.setEnabled(enabled)
-        self.secure_move_btn.setEnabled(enabled)
-        self.results_secure_delete_btn.setEnabled(enabled)
-        self.results_secure_move_btn.setEnabled(enabled)
-        self.copy_btn.setEnabled(enabled)
+        for button in (
+            self.secure_delete_btn,
+            self.secure_move_btn,
+            self.results_secure_delete_btn,
+            self.results_secure_move_btn,
+            self.results_copy_btn,
+            self.copy_btn,
+        ):
+            button.setEnabled(enabled)
 
     def _file_op_running(self) -> bool:
         return any(
@@ -2209,81 +2395,6 @@ class MainWindow(QMainWindow):
                 self.error_secure_worker,
             )
         )
-
-    def _results_secure_delete_checked(self) -> None:
-        """Безопасное удаление из вкладки «Результаты» по галочкам."""
-        if self._file_op_running():
-            QMessageBox.information(
-                self, "Операция", "Файловая операция уже выполняется."
-            )
-            return
-        paths = self.results_model.checked_paths()
-        if not paths:
-            QMessageBox.information(
-                self,
-                "Нет отмеченных строк",
-                "Отметьте строки результатов галочками слева.",
-            )
-            return
-        confirm = QMessageBox.question(
-            self,
-            "Необратимое удаление",
-            f"Безопасно удалить {len(paths)} файлов, отмеченных во вкладке «Результаты»?\n\n"
-            "Оригиналы будут многократно перезаписаны и удалены. Действие необратимо.",
-        )
-        if confirm != QMessageBox.Yes:
-            return
-        self.secure_worker = SecureOpWorker(
-            "delete", paths, passes=load_settings().secure_passes
-        )
-        self.secure_worker.finished_ok.connect(
-            lambda result: self._on_secure_finished("удалено", result)
-        )
-        self.secure_worker.failed.connect(self._on_secure_failed)
-        self._set_secure_controls_enabled(False)
-        self.secure_worker.start()
-
-    def _results_secure_move_checked(self) -> None:
-        """Безопасное перемещение из вкладки «Результаты» по галочкам."""
-        if self._file_op_running():
-            QMessageBox.information(
-                self, "Операция", "Файловая операция уже выполняется."
-            )
-            return
-        paths = self.results_model.checked_paths()
-        if not paths:
-            QMessageBox.information(
-                self,
-                "Нет отмеченных строк",
-                "Отметьте строки результатов галочками слева.",
-            )
-            return
-        destination = QFileDialog.getExistingDirectory(
-            self, "Куда безопасно переместить файлы"
-        )
-        if not destination:
-            return
-        confirm = QMessageBox.question(
-            self,
-            "Безопасное перемещение",
-            f"Переместить {len(paths)} файлов, отмеченных во вкладке «Результаты», в:\n{destination}\n\n"
-            "Сначала будет создана новая копия, затем оригинал будет многократно "
-            "перезаписан и удалён с прежнего места.",
-        )
-        if confirm != QMessageBox.Yes:
-            return
-        self.secure_worker = SecureOpWorker(
-            "move",
-            paths,
-            destination,
-            passes=load_settings().secure_passes,
-        )
-        self.secure_worker.finished_ok.connect(
-            lambda result: self._on_secure_finished("перемещено", result)
-        )
-        self.secure_worker.failed.connect(self._on_secure_failed)
-        self._set_secure_controls_enabled(False)
-        self.secure_worker.start()
 
     def _refresh_found_files_after_operation(self) -> None:
         """Убирает из моделей строки отсутствующих на диске файлов."""

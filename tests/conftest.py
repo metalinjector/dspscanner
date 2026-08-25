@@ -39,6 +39,35 @@ def _isolated_config(tmp_path, monkeypatch):
     invalidate_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_qsettings(tmp_path):
+    """Уводит QSettings главного окна в tmp.
+
+    ``MainWindow`` сохраняет геометрию, пути поиска и папку копирования в
+    пользовательский QSettings. Без изоляции тесты перезаписывали реальные
+    настройки разработчика — например, подставляли в «Папку» временный
+    каталог pytest, который потом оставался в интерфейсе.
+    """
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:  # headless-набор без Qt: изолировать нечего
+        yield
+        return
+
+    previous_format = QSettings.defaultFormat()
+    settings_dir = tmp_path / "qsettings"
+    settings_dir.mkdir(exist_ok=True)
+    # NativeFormat на Windows — реестр, и setPath его не переопределяет,
+    # поэтому формат по умолчанию принудительно переводится в INI-файл.
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(settings_dir))
+    QSettings.setPath(QSettings.IniFormat, QSettings.SystemScope, str(settings_dir))
+    try:
+        yield
+    finally:
+        QSettings.setDefaultFormat(previous_format)
+
+
 def make_docx(path: Path, body_text: str | None = None, altchunk_html: str | None = None) -> Path:
     """Собирает минимальный, но настоящий DOCX-контейнер."""
     with zipfile.ZipFile(path, "w") as archive:

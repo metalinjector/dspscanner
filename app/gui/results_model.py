@@ -72,11 +72,18 @@ class CheckboxDelegate(QStyledItemDelegate):
         style = widget.style() if widget is not None else QApplication.style()
         opt.text = ""
         style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
-        indicator_opt = QStyleOptionButton(opt)
+
+        # QStyleOptionButton нельзя сконструировать из QStyleOptionViewItem:
+        # это разные ветви иерархии, и PySide6 отвергает такой вызов
+        # (TypeError с последующим падением отрисовки). Поля переносятся руками.
+        indicator_opt = QStyleOptionButton()
+        indicator_opt.palette = opt.palette
+        indicator_opt.fontMetrics = opt.fontMetrics
         indicator_opt.state = QStyle.State_Enabled
         indicator_opt.state |= (
             QStyle.State_On if opt.checkState == Qt.Checked else QStyle.State_Off
         )
+        indicator_opt.rect = opt.rect
         rect = style.subElementRect(
             QStyle.SE_CheckBoxIndicator, indicator_opt, widget
         )
@@ -86,7 +93,14 @@ class CheckboxDelegate(QStyledItemDelegate):
 
     def editorEvent(self, event, model, option, index):
         from PySide6.QtCore import QEvent
-        if event.type() == QEvent.MouseButtonRelease:
+
+        # Переключает только левая кнопка: правая открывает контекстное меню
+        # операций над отмеченными, и менять отметку под курсором при этом
+        # нельзя — пользователь целился в меню, а не в галочку.
+        if (
+            event.type() == QEvent.MouseButtonRelease
+            and event.button() == Qt.LeftButton
+        ):
             current = index.data(Qt.CheckStateRole)
             new_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
             model.setData(index, new_state, Qt.CheckStateRole)
@@ -610,11 +624,47 @@ class _FileRow:
         )
 
     @property
+    def filename_result(self) -> SearchResult | None:
+        return next((item for item in self.results if is_filename_match(item)), None)
+
+    @property
     def occurrence_count(self) -> int:
         return len(self.results)
 
+    @property
+    def words(self) -> list[str]:
+        """Уникальные термины файла в порядке первого появления."""
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for result in self.results:
+            key = result.word.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(result.word)
+        return ordered
 
-_FILE_HEADERS = ["✓", "Файл", "Совпадений", "Контекст", "Тип", "Изменён", "Путь"]
+    @property
+    def words_text(self) -> str:
+        return WORDS_SEPARATOR.join(self.words)
+
+
+# Раскладка совпадает с «Результатами» по номерам колонок: обе вкладки
+# используют одни и те же делегаты подсветки и индексы в главном окне.
+_FILE_HEADERS = [
+    "✓",
+    "Файл",
+    "Слово",
+    "Кол-во совпадений",
+    "Контекст",
+    "Тип",
+    "Изменён",
+    "Путь",
+]
+# Разделитель списка терминов в колонке «Слово» вкладки «Файлы».
+WORDS_SEPARATOR = ", "
+# Индекс колонки с числом совпадений (кликабельной) во вкладке «Файлы».
+_FILE_OCCURRENCES_COLUMN = 3
 
 
 class FilesTableModel(QAbstractTableModel):
@@ -629,6 +679,14 @@ class FilesTableModel(QAbstractTableModel):
         self._row_by_path: dict[str, int] = {}
         self._checked_paths: set[str] = set()
         self._labels_dict: dict[str, str] = {}
+        # Как и в «Результатах», самый длинный контекст копится по мере
+        # поступления строк: ширина колонки подгоняется по нему без обхода
+        # всей модели.
+        self._longest_context = ""
+
+    def longest_context(self) -> str:
+        """Самая длинная строка столбца «Контекст» среди загруженных."""
+        return self._longest_context
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self._rows)
@@ -651,6 +709,7 @@ class FilesTableModel(QAbstractTableModel):
             values = [
                 "",
                 self._labels_dict.get(primary.full_path, Path(primary.full_path).name),
+                row.words_text,
                 row.occurrence_count,
                 primary.context,
                 primary.file_type,
@@ -664,15 +723,28 @@ class FilesTableModel(QAbstractTableModel):
             )
         if role == Qt.ToolTipRole:
             return file_tooltip_html(row.full_path, row.results)
-        if role == Qt.TextAlignmentRole and col == 2:
+        if role == Qt.TextAlignmentRole and col == _FILE_OCCURRENCES_COLUMN:
             return int(Qt.AlignCenter)
-        if role == Qt.ForegroundRole and col == 2:
+        if role == Qt.ForegroundRole and col == _FILE_OCCURRENCES_COLUMN:
             return QColor(CONTENT_MATCH_COLOR)
-        if role == Qt.FontRole and col == 2:
+        if role == Qt.FontRole and col == _FILE_OCCURRENCES_COLUMN:
             font = QFont()
             font.setBold(True)
             font.setUnderline(True)
             return font
+        if role == MatchRole:
+            # Колонка «Файл» подсвечивается совпадением в имени, «Контекст» —
+            # совпадением внутри текста, ровно как во вкладке «Результаты».
+            if col == 1:
+                filename_result = row.filename_result
+                if filename_result is not None:
+                    return filename_result.matched_text or filename_result.word
+                return None
+            return primary.matched_text or primary.word
+        if role == FilenameMatchRole:
+            if col == 1:
+                return row.filename_result is not None
+            return is_filename_match(primary)
         if role in (PathRole, FileIdRole):
             return row.full_path
         if role == OccurrencesRole:
@@ -715,6 +787,8 @@ class FilesTableModel(QAbstractTableModel):
                 by_path[result.full_path] = []
                 order.append(result.full_path)
             by_path[result.full_path].append(result)
+            if len(result.context) > len(self._longest_context):
+                self._longest_context = result.context
 
         paths_by_name: dict[str, set[str]] = {}
         for path in order:
@@ -745,8 +819,14 @@ class FilesTableModel(QAbstractTableModel):
         for row_index in sorted(changed_rows):
             self.dataChanged.emit(
                 self.index(row_index, 1),
-                self.index(row_index, 2),
-                [Qt.DisplayRole, Qt.ToolTipRole, OccurrencesRole],
+                self.index(row_index, self.columnCount() - 1),
+                [
+                    Qt.DisplayRole,
+                    Qt.ToolTipRole,
+                    OccurrencesRole,
+                    MatchRole,
+                    FilenameMatchRole,
+                ],
             )
 
     def clear(self) -> None:
@@ -755,6 +835,7 @@ class FilesTableModel(QAbstractTableModel):
         self._row_by_path = {}
         self._checked_paths = set()
         self._labels_dict = {}
+        self._longest_context = ""
         self.endResetModel()
 
     def set_all_checked(self, checked: bool) -> None:
