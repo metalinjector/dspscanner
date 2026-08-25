@@ -1356,3 +1356,49 @@ def test_terms_dialog_shows_ruled_lines_when_empty(qt_app):
     # Отрисовка пустого списка не должна падать.
     dialog.list.resize(300, 200)
     dialog.list.grab()
+
+
+def test_secure_erase_help_is_formatted_as_rich_text(window, monkeypatch):
+    """Пояснение о безопасном удалении показывается размеченным.
+
+    Текст длинный и структурный. Если Qt покажет его как обычную строку,
+    пользователь увидит сырые теги вместо заголовков и списков.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.gui.main_window import _SECURE_ERASE_HELP
+
+    captured = {}
+
+    def fake_exec(self):
+        captured["format"] = self.textFormat()
+        captured["text"] = self.text()
+        captured["title"] = self.windowTitle()
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    window._show_help("Что делает безопасное удаление", _SECURE_ERASE_HELP)
+
+    assert captured["format"] == Qt.TextFormat.RichText
+    assert captured["title"] == "Что делает безопасное удаление"
+    # Ключевые предупреждения должны остаться в тексте.
+    assert "SSD" in captured["text"]
+    assert "NIST SP 800-88" in captured["text"]
+
+
+def test_plain_help_text_is_not_forced_into_rich_text(window, monkeypatch):
+    """Обычные подсказки без разметки показываются как прежде."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    captured = {}
+
+    def fake_exec(self):
+        captured["format"] = self.textFormat()
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    window._show_help("Размер, МБ", "Максимальный размер одного файла.")
+
+    assert captured["format"] == Qt.TextFormat.AutoText
