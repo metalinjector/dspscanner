@@ -4,6 +4,8 @@
 Аудит v3 (реализация рекомендаций отчёта по отладке):
     1. Автопереключение на вкладку "Результаты" (`setCurrentIndex(0)`)
        при старте сканирования, чтобы пользователь сразу видел совпадения.
+       Начиная с 4.2.0 «Результаты» и «Файлы» — не разные вкладки, а два
+       режима группировки одной таблицы (см. `_build_results_tab`).
     2. Добавлена подробная диагностика в журнал при старте сканирования
        (пути, ключевые слова, выбранные типы, статус OCR).
     3. Компактный список обрабатываемых файлов (`processing_list`, макс. 50 шт.)
@@ -72,6 +74,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QScrollArea,
     QFrame,
+    QRadioButton,
+    QButtonGroup,
+    QStackedWidget,
 )
 
 from app.config import (
@@ -128,6 +133,10 @@ _CONTEXT_COLUMN_INDEX = 4
 # вкладок: делегаты, автоподгонка и обработчики кликов переиспользуются.
 _CONTEXT_COLUMN_MIN_WIDTH = 260
 _CONTEXT_COLUMN_MAX_WIDTH = 900
+# Режимы группировки единой вкладки «Результаты». Совпадают с индексами
+# страниц QStackedWidget, поэтому переключение — это просто setCurrentIndex.
+_GROUP_BY_MATCH = 0
+_GROUP_BY_FILE = 1
 # Поля ячейки в делегате подсветки плюс запас на полужирные фрагменты
 # совпадений: измеряем обычным шрифтом, а рисуются они шире.
 _CONTEXT_COLUMN_PADDING = 28
@@ -225,9 +234,9 @@ class MainWindow(QMainWindow):
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy_model.setDynamicSortFilter(False)
 
-        # Подробная таблица файлов: синхронизируется с результатами по мере
-        # их поступления. Прокси-модель даёт сортировку и фильтрацию как в
-        # вкладке «Результаты».
+        # Вторая группировка той же выборки: одна строка на файл. Модель
+        # синхронизируется с результатами по мере их поступления и живёт на
+        # соседней странице QStackedWidget той же вкладки.
         self.files_model = FilesTableModel(self)
         self.files_proxy_model = QSortFilterProxyModel(self)
         self.files_proxy_model.setSourceModel(self.files_model)
@@ -267,6 +276,12 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_ui()
+        # Клик по галочке в таблице меняет модель напрямую, минуя кнопки, —
+        # счётчик и доступность операций подписываются на сам сигнал.
+        for model in (self.results_model, self.files_model):
+            model.dataChanged.connect(self._on_model_data_changed)
+            model.modelReset.connect(self._update_results_summary)
+        self._update_results_summary()
         self._connect_log_handler()
         self._setup_auto_save()
         self._restore_settings()
@@ -793,46 +808,109 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_results_tab(), "Результаты")
-        self.tabs.addTab(self._build_files_tab(), "Файлы")
         self.tabs.addTab(self._build_log_tab(), "Журнал")
         layout.addWidget(self.tabs)
         return widget
 
     # -- Вкладка: Результаты ----------------------------------------------- #
+    #
+    # Прежде «Результаты» и «Файлы» были разными вкладками, но после
+    # выравнивания колонок различала их только группировка строк. Две таблицы
+    # с одинаковыми заголовками, отдельными галочками и продублированными
+    # кнопками заставляли переключаться туда-обратно и порождали вопрос «где
+    # я отметил файлы». Теперь это одна вкладка с переключателем режима:
+    # таблицы живут в QStackedWidget, а фильтр, отметки и кнопки — общие.
     def _build_results_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(10, 10, 10, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        filter_row = QHBoxLayout()
-        filter_row.setContentsMargins(0, 0, 0, 2)
+        layout.addLayout(self._build_grouping_row())
+
+        self.results_stack = QStackedWidget()
+        self.results_table = self._build_results_table()
+        self.found_files_table = self._build_files_table()
+        self.results_stack.addWidget(self.results_table)
+        self.results_stack.addWidget(self.found_files_table)
+        layout.addWidget(self.results_stack, 1)
+
+        layout.addWidget(self._build_selection_box())
+        layout.addWidget(self._build_operations_box())
+        layout.addLayout(self._build_export_row())
+        return widget
+
+    def _build_grouping_row(self) -> QHBoxLayout:
+        """Переключатель группировки и общий фильтр над таблицей."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 2)
+        row.setSpacing(8)
+
+        row.addWidget(QLabel("Показывать:"))
+        self.group_by_match_radio = QRadioButton("по совпадениям")
+        self.group_by_match_radio.setToolTip(
+            "Отдельная строка на каждое найденное слово в каждом файле"
+        )
+        self.group_by_file_radio = QRadioButton("по файлам")
+        self.group_by_file_radio.setToolTip(
+            "Одна строка на файл; все найденные в нём слова — в колонке «Слово»"
+        )
+        self.group_by_match_radio.setChecked(True)
+        self.grouping_buttons = QButtonGroup(self)
+        self.grouping_buttons.addButton(self.group_by_match_radio, _GROUP_BY_MATCH)
+        self.grouping_buttons.addButton(self.group_by_file_radio, _GROUP_BY_FILE)
+        self.grouping_buttons.idToggled.connect(self._on_grouping_changed)
+        row.addWidget(self.group_by_match_radio)
+        row.addWidget(self.group_by_file_radio)
+
+        self.grouping_hint = QLabel()
+        self.grouping_hint.setObjectName("groupingHint")
+        self.grouping_hint.setStyleSheet("color: #9AA3B2;")
+        row.addWidget(self.grouping_hint)
+        row.addStretch(1)
+
+        # Один фильтр на оба режима: смена группировки не должна сбрасывать
+        # уже набранный запрос.
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Фильтр по любому столбцу…")
-        self.filter_edit.setToolTip("Фильтрация по всем колонкам результатов в реальном времени")
-        self.filter_edit.textChanged.connect(self.proxy_model.setFilterFixedString)
-        filter_row.addWidget(self.filter_edit)
-        layout.addLayout(filter_row)
+        self.filter_edit.setToolTip(
+            "Фильтрация по всем колонкам результатов в реальном времени"
+        )
+        self.filter_edit.setMaximumWidth(360)
+        self.filter_edit.textChanged.connect(self._on_filter_changed)
+        row.addWidget(self.filter_edit)
+        return row
 
-        self.results_table = QTableView()
-        self.results_table.setModel(self.proxy_model)
-        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.results_table.setSortingEnabled(True)
-        self.results_table.setAlternatingRowColors(True)
-        self.results_table.setShowGrid(True)
-        self.results_table.verticalHeader().setVisible(False)
-        self.results_table.verticalHeader().setDefaultSectionSize(24)
-        self.results_table.setWordWrap(False)
+    def _configure_results_view(self, table: QTableView, widths) -> QHeaderView:
+        """Общие настройки обеих таблиц: раскладка колонок у них одинакова."""
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSortingEnabled(True)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(True)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(24)
+        table.setWordWrap(False)
 
-        header = self.results_table.horizontalHeader()
+        header = table.horizontalHeader()
         # Все столбцы остаются управляемыми пользователем: режимы
         # ResizeToContents и Stretch блокируют ручное перетаскивание границ.
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(False)
-        for index, width in enumerate(
-            (34, 220, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 320)
-        ):
-            self.results_table.setColumnWidth(index, width)
+        for index, width in enumerate(widths):
+            table.setColumnWidth(index, width)
+
+        table.setItemDelegateForColumn(_CHECK_COLUMN_INDEX, CheckboxDelegate(self))
+        table.setItemDelegateForColumn(1, HighlightDelegate(filename_column=True))
+        table.setItemDelegateForColumn(_CONTEXT_COLUMN_INDEX, HighlightDelegate())
+        table.setContextMenuPolicy(Qt.CustomContextMenu)
+        return header
+
+    def _build_results_table(self) -> QTableView:
+        table = QTableView()
+        table.setModel(self.proxy_model)
+        header = self._configure_results_view(
+            table, (34, 220, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 320)
+        )
         # Ширина «Контекста» подгоняется под реальные строки, а не берётся
         # фиксированной: длина контекста задаётся настройкой и обычно намного
         # меньше, чем прежние 900 px, из-за чего справа оставалась пустота.
@@ -840,79 +918,122 @@ class MainWindow(QMainWindow):
         # каждую строку модели при любой перекомпоновке, а строк бывают сотни
         # тысяч.
         header.sectionResized.connect(self._on_results_section_resized)
+        table.clicked.connect(self._on_result_table_clicked)
+        table.doubleClicked.connect(self._open_selected_result)
+        table.customContextMenuRequested.connect(self._show_results_context_menu)
+        return table
 
-        self.results_table.setItemDelegateForColumn(0, CheckboxDelegate(self))
-        self.results_table.setItemDelegateForColumn(
-            1, HighlightDelegate(filename_column=True)
+    def _build_files_table(self) -> QTableView:
+        table = QTableView()
+        table.setModel(self.files_proxy_model)
+        header = self._configure_results_view(
+            table, (34, 320, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 380)
         )
-        self.results_table.setItemDelegateForColumn(4, HighlightDelegate())
+        # Автоподгонка «Контекста» работает по тем же правилам, что и в режиме
+        # совпадений, и так же отключается ручным перетаскиванием границы.
+        header.sectionResized.connect(self._on_files_section_resized)
+        table.clicked.connect(self._on_files_table_clicked)
+        table.doubleClicked.connect(self._open_found_file_row)
+        table.customContextMenuRequested.connect(self._show_files_context_menu)
+        return table
 
-        self.results_table.clicked.connect(self._on_result_table_clicked)
-        self.results_table.doubleClicked.connect(self._open_selected_result)
-        self.results_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.results_table.customContextMenuRequested.connect(
-            self._show_results_context_menu
-        )
-        layout.addWidget(self.results_table, 1)
+    def _build_selection_box(self) -> QGroupBox:
+        """Отметка строк и обычное (неразрушающее) копирование.
 
-        # Галочки на строках: отметка файлов для безопасных операций.
-        results_select_row = QHBoxLayout()
-        results_select_row.setContentsMargins(0, 6, 0, 0)
-        results_select_row.setSpacing(8)
-        results_select_all_btn = QPushButton("Отметить все")
-        results_select_all_btn.setToolTip("Отметить галочками все строки результатов")
-        results_clear_all_btn = QPushButton("Снять все")
-        results_clear_all_btn.setToolTip("Снять все галочки")
-        results_select_all_btn.clicked.connect(
-            lambda: self.results_model.set_all_checked(True)
+        Всё в одну строку: панели под таблицей отнимают у неё высоту, а
+        таблица — главное содержимое вкладки.
+        """
+        box = QGroupBox("Отмеченные файлы")
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(14, 22, 14, 10)
+        outer.setSpacing(6)
+
+        select_row = QHBoxLayout()
+        select_row.setSpacing(8)
+        select_all_btn = QPushButton("Отметить все")
+        select_all_btn.setToolTip("Отметить галочками все строки таблицы")
+        clear_all_btn = QPushButton("Снять все")
+        clear_all_btn.setToolTip("Снять все галочки")
+        select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
+        clear_all_btn.clicked.connect(lambda: self._set_all_checked(False))
+        for b in (select_all_btn, clear_all_btn):
+            b.setMinimumHeight(30)
+            select_row.addWidget(b)
+
+        # Счётчик отмеченного: в режиме «по совпадениям» строк больше, чем
+        # файлов, и без подсказки неочевидно, скольких файлов коснётся кнопка.
+        self.checked_summary_label = QLabel()
+        self.checked_summary_label.setObjectName("checkedSummary")
+        self.checked_summary_label.setStyleSheet("color: #9AA3B2;")
+        select_row.addWidget(self.checked_summary_label)
+        select_row.addStretch(1)
+        outer.addLayout(select_row)
+
+        copy_row = QHBoxLayout()
+        copy_row.setSpacing(8)
+        self.copy_dest_edit = QLineEdit(str(DEFAULT_COPY_DESTINATION))
+        self.copy_dest_edit.setToolTip("Папка, в которую копируются отмеченные файлы")
+        # Без нижней границы поле схлопывается до нечитаемого огрызка, когда
+        # соседние кнопки требуют места.
+        self.copy_dest_edit.setMinimumWidth(240)
+        browse_btn = QPushButton("Обзор…")
+        browse_btn.clicked.connect(self._browse_copy_dest)
+        self.copy_btn = QPushButton("Скопировать отмеченные")
+        self.copy_btn.setObjectName("primaryButton")
+        self.copy_btn.setToolTip(
+            "Скопировать отмеченные файлы в указанную папку; оригиналы остаются на месте"
         )
-        results_clear_all_btn.clicked.connect(
-            lambda: self.results_model.set_all_checked(False)
+        self.copy_btn.clicked.connect(self._copy_found_files)
+        self.copy_btn.setMinimumHeight(30)
+        copy_row.addWidget(QLabel("Копировать в:"))
+        copy_row.addWidget(self.copy_dest_edit, 1)
+        copy_row.addWidget(browse_btn)
+        copy_row.addWidget(self.copy_btn)
+        outer.addLayout(copy_row)
+        return box
+
+    def _build_operations_box(self) -> QGroupBox:
+        """Необратимые операции — в отдельной рамке, подальше от остальных.
+
+        Соседство «Экспорта» и «Безопасно удалить» на одной панели — прямой
+        путь к случайному нажатию, поэтому разрушающие действия вынесены в
+        собственную рамку: красный контур, заголовок со словом «необратимо»
+        и подпись о многопроходной перезаписи.
+        """
+        box = QGroupBox("Безопасные операции (необратимо)")
+        box.setObjectName("dangerZoneBox")
+        row = QHBoxLayout(box)
+        row.setContentsMargins(14, 22, 14, 10)
+        row.setSpacing(8)
+
+        self.secure_move_btn = QPushButton("Безопасно переместить отмеченные…")
+        self.secure_move_btn.setToolTip(
+            "Создать копии в выбранной папке, проверить их по SHA-256, "
+            "затем перезаписать и удалить оригиналы"
         )
-        self.results_secure_delete_btn = QPushButton("Безопасно удалить отмеченные")
-        self.results_secure_delete_btn.setObjectName("dangerButton")
-        self.results_secure_delete_btn.setToolTip(
-            "Многократно перезаписать и удалить файлы отмеченных строк (необратимо)"
+        self.secure_move_btn.clicked.connect(self._secure_move_selected)
+        self.secure_delete_btn = QPushButton("Безопасно удалить отмеченные")
+        self.secure_delete_btn.setObjectName("dangerButton")
+        self.secure_delete_btn.setToolTip(
+            "Многократно перезаписать и удалить отмеченные файлы (необратимо)"
         )
-        self.results_secure_delete_btn.clicked.connect(
-            self._results_secure_delete_checked
-        )
-        self.results_secure_move_btn = QPushButton("Безопасно переместить отмеченные…")
-        self.results_secure_move_btn.setToolTip(
-            "Создать копии в выбранной папке, затем перезаписать и удалить оригиналы"
-        )
-        self.results_secure_move_btn.clicked.connect(
-            self._results_secure_move_checked
-        )
-        self.results_copy_btn = QPushButton("Скопировать отмеченные…")
-        self.results_copy_btn.setToolTip(
-            "Скопировать файлы отмеченных строк в выбранную папку; "
-            "оригиналы остаются на месте"
-        )
-        self.results_copy_btn.clicked.connect(self._results_copy_checked)
-        # Пять кнопок в один ряд не помещаются на узком окне и обрезаются:
-        # отметка слева, операции над отмеченными — во втором ряду.
-        for b in (results_select_all_btn, results_clear_all_btn):
+        self.secure_delete_btn.clicked.connect(self._secure_delete_selected)
+        for b in (self.secure_move_btn, self.secure_delete_btn):
             b.setMinimumHeight(32)
-            results_select_row.addWidget(b)
-        results_select_row.addStretch(1)
-        layout.addLayout(results_select_row)
+            row.addWidget(b)
 
-        results_ops_row = QHBoxLayout()
-        results_ops_row.setContentsMargins(0, 2, 0, 0)
-        results_ops_row.setSpacing(8)
-        for b in (
-            self.results_copy_btn,
-            self.results_secure_move_btn,
-            self.results_secure_delete_btn,
-        ):
-            b.setMinimumHeight(32)
-            results_ops_row.addWidget(b)
-        results_ops_row.addStretch(1)
-        layout.addLayout(results_ops_row)
+        warning = QLabel(
+            "Файлы стираются многопроходной перезаписью — восстановить их "
+            "штатными средствами не получится."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #9AA3B2;")
+        row.addWidget(warning, 1)
+        return box
 
+    def _build_export_row(self) -> QHBoxLayout:
         export_row = QHBoxLayout()
-        export_row.setContentsMargins(0, 6, 0, 4)
+        export_row.setContentsMargins(0, 4, 0, 0)
         export_row.setSpacing(8)
         export_excel_btn = QPushButton("Экспорт в Excel")
         export_excel_btn.setObjectName("exportExcelButton")
@@ -934,120 +1055,83 @@ class MainWindow(QMainWindow):
             b.setMinimumHeight(36)
             export_row.addWidget(b)
         export_row.addStretch(1)
-        layout.addLayout(export_row)
-        return widget
+        return export_row
 
-    # -- Вкладка: Файлы --------------------------------------------------- #
-    def _build_files_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(10, 10, 10, 12)
-        layout.setSpacing(10)
+    # ------------------------------------------------------------------ #
+    # Режим группировки
+    # ------------------------------------------------------------------ #
+    def _grouping_mode(self) -> int:
+        return self.grouping_buttons.checkedId()
 
-        info_label = QLabel(
-            "Найденные файлы появляются здесь сразу во время сканирования — "
-            "по одной строке на файл, с найденными словами, количеством "
-            "совпадений, контекстом, типом и датой изменения, как во вкладке "
-            "«Результаты». Совпадения подсвечены, число в столбце «Кол-во "
-            "совпадений» открывает все контексты файла. Наведите курсор, чтобы "
-            "увидеть расширенные фрагменты. Отметьте нужные файлы галочками "
-            "слева — копирование и безопасные операции работают по отмеченным."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #9AA3B2; padding: 4px;")
-        layout.addWidget(info_label)
+    def _grouped_by_file(self) -> bool:
+        return self._grouping_mode() == _GROUP_BY_FILE
 
-        select_row = QHBoxLayout()
-        select_row.setContentsMargins(0, 3, 0, 3)
-        select_row.setSpacing(8)
-        select_all_btn = QPushButton("Отметить все")
-        select_all_btn.setToolTip("Выбрать все файлы в списке")
-        clear_all_btn = QPushButton("Снять все")
-        clear_all_btn.setToolTip("Снять выделение со всех файлов")
-        select_all_btn.clicked.connect(
-            lambda: self.files_model.set_all_checked(True)
+    def active_table(self) -> QTableView:
+        """Таблица видимого режима — точка входа для действий и тестов."""
+        return (
+            self.found_files_table if self._grouped_by_file() else self.results_table
         )
-        clear_all_btn.clicked.connect(
-            lambda: self.files_model.set_all_checked(False)
-        )
-        files_filter = QLineEdit()
-        files_filter.setPlaceholderText("Фильтр по любому столбцу…")
-        files_filter.setMaximumWidth(360)
-        files_filter.textChanged.connect(
-            self.files_proxy_model.setFilterFixedString
-        )
-        select_row.addWidget(select_all_btn)
-        select_row.addWidget(clear_all_btn)
-        select_row.addStretch(1)
-        select_row.addWidget(files_filter)
-        layout.addLayout(select_row)
 
-        self.found_files_table = QTableView()
-        self.found_files_table.setModel(self.files_proxy_model)
-        self.found_files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.found_files_table.setSortingEnabled(True)
-        self.found_files_table.setAlternatingRowColors(True)
-        self.found_files_table.setShowGrid(True)
-        self.found_files_table.verticalHeader().setVisible(False)
-        self.found_files_table.verticalHeader().setDefaultSectionSize(24)
-        self.found_files_table.setWordWrap(False)
-        files_header = self.found_files_table.horizontalHeader()
-        files_header.setSectionResizeMode(QHeaderView.Interactive)
-        files_header.setStretchLastSection(False)
-        for index, width in enumerate(
-            (34, 320, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 380)
-        ):
-            self.found_files_table.setColumnWidth(index, width)
-        # Автоподгонка «Контекста» работает по тем же правилам, что и в
-        # «Результатах», и так же отключается ручным перетаскиванием границы.
-        files_header.sectionResized.connect(self._on_files_section_resized)
+    def active_model(self):
+        return self.files_model if self._grouped_by_file() else self.results_model
 
-        self.found_files_table.setItemDelegateForColumn(0, CheckboxDelegate(self))
-        self.found_files_table.setItemDelegateForColumn(
-            1, HighlightDelegate(filename_column=True)
-        )
-        self.found_files_table.setItemDelegateForColumn(
-            _CONTEXT_COLUMN_INDEX, HighlightDelegate()
-        )
-        self.found_files_table.clicked.connect(self._on_files_table_clicked)
-        self.found_files_table.doubleClicked.connect(
-            self._open_found_file_row
-        )
-        self.found_files_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.found_files_table.customContextMenuRequested.connect(
-            self._show_files_context_menu
-        )
-        layout.addWidget(self.found_files_table, 1)
+    def _on_grouping_changed(self, mode: int, checked: bool) -> None:
+        if not checked:
+            return
+        # Галочки переносятся между режимами: пользователь отмечал файлы, а
+        # не строки, и терять отметку при переключении вида недопустимо.
+        source = self.results_model if mode == _GROUP_BY_FILE else self.files_model
+        target = self.files_model if mode == _GROUP_BY_FILE else self.results_model
+        target.set_checked_paths(source.checked_paths())
 
-        copy_box = QGroupBox("Копирование отмеченных файлов")
-        copy_layout = QHBoxLayout(copy_box)
-        copy_layout.setContentsMargins(16, 32, 16, 16)
-        copy_layout.setSpacing(8)
-        self.copy_dest_edit = QLineEdit(str(DEFAULT_COPY_DESTINATION))
-        browse_btn = QPushButton("Обзор…")
-        browse_btn.clicked.connect(self._browse_copy_dest)
-        self.copy_btn = QPushButton("Скопировать отмеченные")
-        self.copy_btn.setObjectName("primaryButton")
-        self.copy_btn.clicked.connect(self._copy_found_files)
-        copy_layout.addWidget(QLabel("Папка:"))
-        copy_layout.addWidget(self.copy_dest_edit, 1)
-        copy_layout.addWidget(browse_btn)
-        copy_layout.addWidget(self.copy_btn)
-        layout.addWidget(copy_box)
+        self.results_stack.setCurrentIndex(mode)
+        if mode == _GROUP_BY_FILE:
+            self._auto_fit_files_context_column()
+        else:
+            self._auto_fit_context_column()
+        self._update_results_summary()
 
-        secure_row = QHBoxLayout()
-        secure_row.setContentsMargins(0, 4, 0, 4)
-        secure_row.setSpacing(8)
-        self.secure_delete_btn = QPushButton("Безопасно удалить отмеченные")
-        self.secure_delete_btn.setObjectName("dangerButton")
-        self.secure_delete_btn.clicked.connect(self._secure_delete_selected)
-        self.secure_move_btn = QPushButton("Безопасно переместить отмеченные…")
-        self.secure_move_btn.clicked.connect(self._secure_move_selected)
-        secure_row.addWidget(self.secure_delete_btn)
-        secure_row.addWidget(self.secure_move_btn)
-        secure_row.addStretch(1)
-        layout.addLayout(secure_row)
-        return widget
+    def _on_model_data_changed(self, _top_left, _bottom_right, roles=()) -> None:
+        """Обновляет счётчик, когда галочку поставили прямо в таблице."""
+        if not roles or Qt.CheckStateRole in roles:
+            self._update_results_summary()
+
+    def _on_filter_changed(self, text: str) -> None:
+        """Один фильтр применяется к обеим таблицам."""
+        self.proxy_model.setFilterFixedString(text)
+        self.files_proxy_model.setFilterFixedString(text)
+
+    def _set_all_checked(self, checked: bool) -> None:
+        """Отмечает всё в видимом режиме и переносит выбор во второй."""
+        self.active_model().set_all_checked(checked)
+        source = self.active_model()
+        other = self.results_model if self._grouped_by_file() else self.files_model
+        other.set_checked_paths(source.checked_paths())
+        self._update_results_summary()
+
+    def _checked_paths(self) -> List[str]:
+        """Отмеченные файлы видимого режима."""
+        return self.active_model().checked_paths()
+
+    def _update_results_summary(self) -> None:
+        """Подписи: сколько строк показано и сколько файлов отмечено."""
+        if self._grouped_by_file():
+            files = self.files_model.count()
+            self.grouping_hint.setText(f"строк: {files} (по одной на файл)")
+        else:
+            rows = self.results_model.count()
+            occurrences = self.results_model.occurrence_count()
+            self.grouping_hint.setText(
+                f"строк: {rows}, совпадений: {occurrences}"
+            )
+
+        checked = self.active_model().checked_count()
+        self.checked_summary_label.setText(
+            f"отмечено файлов: {checked}" if checked else "ничего не отмечено"
+        )
+        enabled = checked > 0 and not self._file_op_running()
+        for button in (self.copy_btn, self.secure_move_btn, self.secure_delete_btn):
+            button.setEnabled(enabled)
 
     # -- Вкладка: Журнал --------------------------------------------------- #
     def _build_log_tab(self) -> QWidget:
@@ -1918,7 +2002,7 @@ class MainWindow(QMainWindow):
         secure_move_action = menu.addAction("Безопасно переместить отмеченные…")
         secure_delete_action = menu.addAction("Безопасно удалить отмеченные")
 
-        has_checked = self.results_model.has_checked()
+        has_checked = self.active_model().has_checked()
         for a in (copy_checked_action, secure_move_action, secure_delete_action):
             a.setEnabled(has_checked)
 
@@ -1938,13 +2022,13 @@ class MainWindow(QMainWindow):
             return
 
         if action == copy_checked_action:
-            self._results_copy_checked()
+            self._copy_checked()
             return
         if action == secure_move_action:
-            self._results_secure_move_checked()
+            self._secure_move_checked()
             return
         if action == secure_delete_action:
-            self._results_secure_delete_checked()
+            self._secure_delete_checked()
             return
 
         if action == open_file_action and result:
@@ -2136,7 +2220,7 @@ class MainWindow(QMainWindow):
         secure_move_action = menu.addAction("Безопасно переместить отмеченные…")
         secure_delete_action = menu.addAction("Безопасно удалить отмеченные")
 
-        has_checked = bool(self.files_model.checked_paths())
+        has_checked = self.files_model.has_checked()
         for a in (copy_checked_action, secure_move_action, secure_delete_action):
             a.setEnabled(has_checked)
 
@@ -2157,13 +2241,13 @@ class MainWindow(QMainWindow):
         if action is None:
             return
         if action == copy_checked_action:
-            self._copy_checked(self._FILES_ORIGIN)
+            self._copy_checked()
             return
         if action == secure_move_action:
-            self._secure_move_selected()
+            self._secure_move_checked()
             return
         if action == secure_delete_action:
-            self._secure_delete_selected()
+            self._secure_delete_checked()
             return
         if result is None:
             return
@@ -2192,12 +2276,13 @@ class MainWindow(QMainWindow):
                 self.files_model.setData(index, Qt.Checked, Qt.CheckStateRole)
 
     def _update_files_tab_title(self) -> None:
-        """Число найденных файлов видно на самой вкладке, не только по её содержимому."""
+        """Число найденных файлов видно на самой вкладке «Результаты»."""
         count = self.files_model.count()
-        self.tabs.setTabText(1, f"Файлы ({count})" if count else "Файлы")
+        self.tabs.setTabText(0, f"Результаты ({count})" if count else "Результаты")
+        self._update_results_summary()
 
     def _checked_found_paths(self) -> List[str]:
-        return self.files_model.checked_paths()
+        return self._checked_paths()
 
     def _browse_copy_dest(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -2205,10 +2290,6 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self.copy_dest_edit.setText(folder)
-
-    def _copy_found_files(self) -> None:
-        """Копирование по кнопке вкладки «Файлы»: папка берётся из поля."""
-        self._copy_checked(self._FILES_ORIGIN, self.copy_dest_edit.text())
 
     def _on_copy_finished(self, mappings: List[CopyMapping]) -> None:
         self._set_secure_controls_enabled(True)
@@ -2233,41 +2314,22 @@ class MainWindow(QMainWindow):
     # проверить занятость воркеров, подтвердить и запустить SecureOpWorker.
     # Раньше сценарий был скопирован четырежды, и правки расходились.
 
-    _FILES_ORIGIN = "files"
-    _RESULTS_ORIGIN = "results"
-
-    def _origin_titles(self, origin: str) -> tuple[str, str]:
-        """Заголовок и текст предупреждения о пустом выборе для вкладки."""
-        if origin == self._RESULTS_ORIGIN:
-            return (
-                "Нет отмеченных строк",
-                "Отметьте строки результатов галочками слева.",
-            )
-        return ("Нет отмеченных файлов", "Отметьте файлы чекбоксами слева.")
-
-    def _checked_paths_for(self, origin: str) -> List[str]:
-        if origin == self._RESULTS_ORIGIN:
-            return self.results_model.checked_paths()
-        return self.files_model.checked_paths()
-
-    def _collect_checked_paths(self, origin: str) -> Optional[List[str]]:
-        """Отмеченные пути вкладки; None — операцию начинать нельзя."""
+    def _collect_checked_paths(self) -> Optional[List[str]]:
+        """Отмеченные файлы видимого режима; None — операцию начинать нельзя."""
         if self._file_op_running():
             QMessageBox.information(
                 self, "Операция", "Файловая операция уже выполняется."
             )
             return None
-        paths = self._checked_paths_for(origin)
+        paths = self._checked_paths()
         if not paths:
-            title, text = self._origin_titles(origin)
-            QMessageBox.information(self, title, text)
+            QMessageBox.information(
+                self,
+                "Нет отмеченных файлов",
+                "Отметьте файлы галочками в первом столбце таблицы.",
+            )
             return None
         return paths
-
-    def _origin_phrase(self, origin: str, count: int) -> str:
-        if origin == self._RESULTS_ORIGIN:
-            return f"{count} файлов, отмеченных во вкладке «Результаты»,"
-        return f"{count} отмеченных файлов"
 
     def _start_secure_operation(
         self, mode: str, paths: List[str], destination: str | None = None
@@ -2292,22 +2354,22 @@ class MainWindow(QMainWindow):
         )
         self.secure_worker.start()
 
-    def _secure_delete_checked(self, origin: str) -> None:
-        paths = self._collect_checked_paths(origin)
+    def _secure_delete_checked(self) -> None:
+        paths = self._collect_checked_paths()
         if paths is None:
             return
         confirm = QMessageBox.question(
             self,
             "Необратимое удаление",
-            f"Безопасно удалить {self._origin_phrase(origin, len(paths))}?\n\n"
+            f"Безопасно удалить {len(paths)} отмеченных файлов?\n\n"
             "Оригиналы будут многократно перезаписаны и удалены. Действие необратимо.",
         )
         if confirm != QMessageBox.Yes:
             return
         self._start_secure_operation("delete", paths)
 
-    def _secure_move_checked(self, origin: str) -> None:
-        paths = self._collect_checked_paths(origin)
+    def _secure_move_checked(self) -> None:
+        paths = self._collect_checked_paths()
         if paths is None:
             return
         destination = QFileDialog.getExistingDirectory(
@@ -2318,7 +2380,7 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.question(
             self,
             "Безопасное перемещение",
-            f"Переместить {self._origin_phrase(origin, len(paths))} в:\n{destination}\n\n"
+            f"Переместить {len(paths)} отмеченных файлов в:\n{destination}\n\n"
             "Сначала будет создана новая копия, затем оригинал будет многократно "
             "перезаписан и удалён с прежнего места.",
         )
@@ -2326,9 +2388,9 @@ class MainWindow(QMainWindow):
             return
         self._start_secure_operation("move", paths, destination)
 
-    def _copy_checked(self, origin: str, destination: str | None = None) -> None:
-        """Копирование отмеченных файлов вкладки в выбранную папку."""
-        paths = self._collect_checked_paths(origin)
+    def _copy_checked(self, destination: str | None = None) -> None:
+        """Копирование отмеченных файлов в выбранную папку."""
+        paths = self._collect_checked_paths()
         if paths is None:
             return
         if destination is None:
@@ -2339,8 +2401,6 @@ class MainWindow(QMainWindow):
             )
             if not destination:
                 return
-            # Обе вкладки используют одно поле назначения: выбор из
-            # «Результатов» подхватывается кнопкой копирования во «Файлах».
             self.copy_dest_edit.setText(destination)
         destination = destination.strip()
         if not destination:
@@ -2354,36 +2414,30 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Копирование отмеченных файлов…")
         self.copy_worker.start()
 
-    # Точки входа вкладки «Файлы».
+    # Кнопки под таблицей и пункты контекстного меню ведут сюда: источник
+    # отметок один — видимый режим группировки.
     def _secure_delete_selected(self) -> None:
-        self._secure_delete_checked(self._FILES_ORIGIN)
+        self._secure_delete_checked()
 
     def _secure_move_selected(self) -> None:
-        self._secure_move_checked(self._FILES_ORIGIN)
+        self._secure_move_checked()
 
-    # Точки входа вкладки «Результаты».
-    def _results_secure_delete_checked(self) -> None:
-        """Безопасное удаление из вкладки «Результаты» по галочкам."""
-        self._secure_delete_checked(self._RESULTS_ORIGIN)
-
-    def _results_secure_move_checked(self) -> None:
-        """Безопасное перемещение из вкладки «Результаты» по галочкам."""
-        self._secure_move_checked(self._RESULTS_ORIGIN)
-
-    def _results_copy_checked(self) -> None:
-        """Копирование отмеченных строк «Результатов» в выбранную папку."""
-        self._copy_checked(self._RESULTS_ORIGIN)
+    def _copy_found_files(self) -> None:
+        """Копирование по кнопке: папка берётся из поля рядом с ней."""
+        self._copy_checked(self.copy_dest_edit.text())
 
     def _set_secure_controls_enabled(self, enabled: bool) -> None:
-        for button in (
-            self.secure_delete_btn,
-            self.secure_move_btn,
-            self.results_secure_delete_btn,
-            self.results_secure_move_btn,
-            self.results_copy_btn,
-            self.copy_btn,
-        ):
-            button.setEnabled(enabled)
+        """Блокирует кнопки на время операции.
+
+        Разблокировка не безусловна: кнопки остаются недоступными, пока
+        ничего не отмечено, иначе после завершения операции они «оживали» на
+        пустом выборе.
+        """
+        if enabled:
+            self._update_results_summary()
+            return
+        for button in (self.secure_delete_btn, self.secure_move_btn, self.copy_btn):
+            button.setEnabled(False)
 
     def _file_op_running(self) -> bool:
         return any(

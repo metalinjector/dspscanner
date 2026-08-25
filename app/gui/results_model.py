@@ -462,6 +462,28 @@ class ResultsTableModel(QAbstractTableModel):
             & set(key[0] for key in self._group_rows)
         )
 
+    def checked_count(self) -> int:
+        """Число отмеченных файлов (не строк): операции работают по файлам."""
+        return len(self.checked_paths())
+
+    def set_checked_paths(self, paths: Iterable[str]) -> None:
+        """Отмечает все строки перечисленных файлов, остальные снимает.
+
+        Нужно при смене группировки: пользователь отметил файлы в одном
+        режиме и вправе увидеть их отмеченными в другом.
+        """
+        wanted = set(paths)
+        fresh = {key for key in self._group_rows if key[0] in wanted}
+        if fresh == self._checked_keys:
+            return
+        self._checked_keys = fresh
+        if self._groups:
+            self.dataChanged.emit(
+                self.index(0, _CHECK_COLUMN),
+                self.index(self.rowCount() - 1, _CHECK_COLUMN),
+                [Qt.CheckStateRole],
+            )
+
     def remove_checked(self) -> set[str]:
         """Сбрасывает модель без отмеченных строк; возвращает их пути."""
         checked_keys = set(self._checked_keys)
@@ -567,6 +589,10 @@ class ResultsTableModel(QAbstractTableModel):
 
     def occurrence_count(self) -> int:
         return len(self._all_results)
+
+    def count(self) -> int:
+        """Число строк — симметрично FilesTableModel.count()."""
+        return len(self._groups)
 
     def all_results(self) -> List[SearchResult]:
         return list(self._all_results)
@@ -859,6 +885,25 @@ class FilesTableModel(QAbstractTableModel):
             for path, row_index in self._row_by_path.items()
             if path in self._checked_paths
         ]
+
+    def has_checked(self) -> bool:
+        return bool(self._checked_paths & set(self._row_by_path))
+
+    def checked_count(self) -> int:
+        return len(self.checked_paths())
+
+    def set_checked_paths(self, paths: Iterable[str]) -> None:
+        """Симметрично ResultsTableModel: перенос отметок между режимами."""
+        fresh = {path for path in paths if path in self._row_by_path}
+        if fresh == self._checked_paths:
+            return
+        self._checked_paths = fresh
+        if self._rows:
+            self.dataChanged.emit(
+                self.index(0, _CHECK_COLUMN),
+                self.index(self.rowCount() - 1, _CHECK_COLUMN),
+                [Qt.CheckStateRole],
+            )
 
     def remove_paths(self, paths: set[str]) -> None:
         if not paths:

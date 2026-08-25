@@ -147,6 +147,16 @@ QGroupBox::title {{
     color: {TEXT_MUTED};
 }}
 
+/* Рамка необратимых операций: приглушённый красный контур отделяет её от
+   обычных групп, чтобы «Безопасно удалить» не читалось как рядовая кнопка. */
+QGroupBox#dangerZoneBox {{
+    border: 1px solid #5E2A2E;
+    background-color: #241B1D;
+}}
+QGroupBox#dangerZoneBox::title {{
+    color: {DANGER};
+}}
+
 QPushButton {{
     background-color: {BG_CARD};
     border: 1px solid {BORDER};
@@ -181,6 +191,15 @@ QPushButton#dangerButton {{
 }}
 QPushButton#dangerButton:hover {{
     background-color: #F2696D;
+}}
+/* У цветных кнопок фон задан явно, и правило QPushButton:disabled его не
+   перебивает: заблокированная кнопка оставалась ярко-красной или синей и
+   выглядела доступной. Для «Безопасно удалить» это прямо опасно. */
+QPushButton#primaryButton:disabled,
+QPushButton#dangerButton:disabled {{
+    background-color: {BG_CARD};
+    color: {TEXT_MUTED};
+    border: 1px solid {BORDER};
 }}
 QPushButton#toolButton {{
     min-height: 18px;

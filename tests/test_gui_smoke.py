@@ -639,8 +639,8 @@ def test_files_and_results_checkboxes_are_independent(window):
     assert window.files_model.checked_paths() == []
 
 
-def test_secure_delete_from_results_shreds_the_checked_file(window, tmp_path, monkeypatch):
-    """Кнопка «Результатов» действительно удаляет отмеченный файл с диска."""
+def test_secure_delete_shreds_the_checked_file(window, tmp_path, monkeypatch):
+    """Кнопка действительно удаляет отмеченный файл с диска."""
     from PySide6.QtWidgets import QMessageBox
 
     victim = tmp_path / "secret.txt"
@@ -655,7 +655,7 @@ def test_secure_delete_from_results_shreds_the_checked_file(window, tmp_path, mo
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
 
-    window._results_secure_delete_checked()
+    window._secure_delete_checked()
     assert window.secure_worker is not None
     window.secure_worker.wait(30_000)
     qt_app_process_events(window)
@@ -663,7 +663,7 @@ def test_secure_delete_from_results_shreds_the_checked_file(window, tmp_path, mo
     assert not victim.exists()
 
 
-def test_secure_move_from_results_copies_then_shreds(window, tmp_path, monkeypatch):
+def test_secure_move_copies_then_shreds(window, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QFileDialog, QMessageBox
 
     source = tmp_path / "src" / "doc.txt"
@@ -684,7 +684,7 @@ def test_secure_move_from_results_copies_then_shreds(window, tmp_path, monkeypat
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
 
-    window._results_secure_move_checked()
+    window._secure_move_checked()
     assert window.secure_worker is not None
     window.secure_worker.wait(30_000)
     qt_app_process_events(window)
@@ -693,8 +693,8 @@ def test_secure_move_from_results_copies_then_shreds(window, tmp_path, monkeypat
     assert (destination / "doc.txt").read_text(encoding="utf-8") == "содержимое"
 
 
-def test_copy_from_results_keeps_the_original(window, tmp_path, monkeypatch):
-    """Копирование отмеченных из «Результатов» не трогает оригиналы."""
+def test_copy_keeps_the_original(window, tmp_path, monkeypatch):
+    """Копирование отмеченных не трогает оригиналы."""
     from PySide6.QtWidgets import QFileDialog, QMessageBox
 
     source = tmp_path / "src" / "doc.txt"
@@ -714,14 +714,14 @@ def test_copy_from_results_keeps_the_original(window, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: QMessageBox.Ok)
     monkeypatch.setattr(type(window), "_open_path", staticmethod(lambda path: None))
 
-    window._results_copy_checked()
+    window._copy_checked()
     assert window.copy_worker is not None
     window.copy_worker.wait(30_000)
     qt_app_process_events(window)
 
     assert source.exists(), "копирование не должно удалять оригинал"
     assert (destination / "doc.txt").read_text(encoding="utf-8") == "содержимое"
-    # Выбранная папка становится общей для обеих вкладок.
+    # Выбранная папка запоминается в поле рядом с кнопкой копирования.
     assert window.copy_dest_edit.text() == str(destination)
 
 
@@ -736,10 +736,11 @@ def test_operations_refuse_to_run_without_checkboxes(window, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
 
     _feed_context(window, TYPICAL_CONTEXT)
-    window._results_secure_delete_checked()
-    window._secure_delete_selected()
+    window._secure_delete_checked()
+    window._secure_move_checked()
+    window._copy_checked()
 
-    assert shown == ["Нет отмеченных строк", "Нет отмеченных файлов"]
+    assert shown == ["Нет отмеченных файлов"] * 3
     assert window.secure_worker is None
 
 
@@ -755,27 +756,36 @@ def test_a_second_operation_waits_for_the_running_one(window, monkeypatch):
     monkeypatch.setattr(
         QMessageBox, "information", lambda parent, title, text, *a, **k: shown.append(title)
     )
-    window._results_secure_delete_checked()
+    window._secure_delete_checked()
 
     assert shown == ["Операция"]
     assert window.secure_worker is None
 
 
 def test_running_operation_disables_every_entry_point(window):
-    """Пока идёт операция, кнопки обеих вкладок заблокированы."""
-    buttons = (
-        window.results_copy_btn,
-        window.results_secure_delete_btn,
-        window.results_secure_move_btn,
-        window.copy_btn,
-        window.secure_delete_btn,
-        window.secure_move_btn,
-    )
+    """Пока идёт операция, все кнопки над файлами заблокированы."""
+    buttons = (window.copy_btn, window.secure_delete_btn, window.secure_move_btn)
+
+    _feed_context(window, TYPICAL_CONTEXT)
+    window._set_all_checked(True)
+    assert all(button.isEnabled() for button in buttons)
+
     window._set_secure_controls_enabled(False)
     assert not any(button.isEnabled() for button in buttons)
 
     window._set_secure_controls_enabled(True)
     assert all(button.isEnabled() for button in buttons)
+
+
+def test_buttons_stay_disabled_while_nothing_is_checked(window):
+    """Разблокировка не должна «оживлять» кнопки на пустом выборе."""
+    buttons = (window.copy_btn, window.secure_delete_btn, window.secure_move_btn)
+
+    _feed_context(window, TYPICAL_CONTEXT)
+    assert not any(button.isEnabled() for button in buttons)
+
+    window._set_secure_controls_enabled(True)
+    assert not any(button.isEnabled() for button in buttons)
 
 
 def qt_app_process_events(window):
@@ -838,3 +848,202 @@ def test_right_click_does_not_toggle_the_checkbox(qt_app):
 
     delegate.editorEvent(_release(Qt.LeftButton), model, QStyleOptionViewItem(), index)
     assert model.data(index, Qt.CheckStateRole) == Qt.Checked
+
+
+# --------------------------------------------------------------------- #
+# Единая вкладка «Результаты» с переключателем группировки
+# --------------------------------------------------------------------- #
+def test_files_tab_is_gone(window):
+    """Вкладок остаётся две: «Результаты» и «Журнал»."""
+    titles = [window.tabs.tabText(index) for index in range(window.tabs.count())]
+    assert len(titles) == 2
+    assert titles[0].startswith("Результаты")
+    assert titles[1] == "Журнал"
+
+
+def test_both_groupings_live_in_one_tab(window):
+    """Обе таблицы — страницы одного стека, а не разные вкладки."""
+    from app.gui.main_window import _GROUP_BY_FILE, _GROUP_BY_MATCH
+
+    assert window.results_stack.count() == 2
+    assert window.results_stack.widget(_GROUP_BY_MATCH) is window.results_table
+    assert window.results_stack.widget(_GROUP_BY_FILE) is window.found_files_table
+    # По умолчанию — привычный режим совпадений.
+    assert window.results_stack.currentIndex() == _GROUP_BY_MATCH
+    assert window.active_table() is window.results_table
+
+
+def test_switching_grouping_swaps_the_visible_table(window):
+    from app.gui.main_window import _GROUP_BY_FILE, _GROUP_BY_MATCH
+
+    _feed_context(window, TYPICAL_CONTEXT)
+
+    window.group_by_file_radio.setChecked(True)
+    assert window.results_stack.currentIndex() == _GROUP_BY_FILE
+    assert window.active_table() is window.found_files_table
+    assert window.active_model() is window.files_model
+
+    window.group_by_match_radio.setChecked(True)
+    assert window.results_stack.currentIndex() == _GROUP_BY_MATCH
+    assert window.active_model() is window.results_model
+
+
+def test_grouping_changes_row_count_but_not_the_columns(window):
+    """Ровно то, ради чего режимы и нужны: одни данные, разная детализация."""
+    window._on_results_found([
+        SearchResult("a.txt", "/x/a.txt", "договор", "про договор", "txt", "2026"),
+        SearchResult("a.txt", "/x/a.txt", "акт", "про акт", "txt", "2026"),
+    ])
+
+    assert window.results_model.rowCount() == 2, "строка на каждое слово"
+    assert window.files_model.rowCount() == 1, "одна строка на файл"
+    assert window.results_model.columnCount() == window.files_model.columnCount()
+
+
+def test_checkmarks_survive_a_grouping_switch(window):
+    """Пользователь отмечает файлы, а не строки: смена вида их не теряет."""
+    window._on_results_found([
+        SearchResult("a.txt", "/x/a.txt", "договор", "про договор", "txt", "2026"),
+        SearchResult("b.txt", "/x/b.txt", "акт", "про акт", "txt", "2026"),
+    ])
+
+    index = window.results_model.index(0, CHECK_COLUMN)
+    window.results_model.setData(index, Qt_checked(), Qt_check_role())
+    checked_before = window.results_model.checked_paths()
+
+    window.group_by_file_radio.setChecked(True)
+    assert window.files_model.checked_paths() == checked_before
+
+    window.group_by_match_radio.setChecked(True)
+    assert window.results_model.checked_paths() == checked_before
+
+
+def test_one_filter_serves_both_groupings(window):
+    """Фильтр общий: набранный запрос не сбрасывается переключением вида."""
+    window._on_results_found([
+        SearchResult("a.txt", "/x/a.txt", "договор", "про договор", "txt", "2026"),
+        SearchResult("b.txt", "/x/b.txt", "акт", "про акт", "txt", "2026"),
+    ])
+
+    window.filter_edit.setText("договор")
+    assert window.proxy_model.rowCount() == 1
+    assert window.files_proxy_model.rowCount() == 1
+
+    window.group_by_file_radio.setChecked(True)
+    assert window.filter_edit.text() == "договор"
+    assert window.files_proxy_model.rowCount() == 1
+
+
+def test_select_all_applies_to_the_visible_grouping(window):
+    window._on_results_found([
+        SearchResult("a.txt", "/x/a.txt", "договор", "про договор", "txt", "2026"),
+        SearchResult("b.txt", "/x/b.txt", "акт", "про акт", "txt", "2026"),
+    ])
+
+    window.group_by_file_radio.setChecked(True)
+    window._set_all_checked(True)
+    assert sorted(window.files_model.checked_paths()) == ["/x/a.txt", "/x/b.txt"]
+    # И сразу же доступны во втором режиме.
+    assert sorted(window.results_model.checked_paths()) == ["/x/a.txt", "/x/b.txt"]
+
+    window._set_all_checked(False)
+    assert window.files_model.checked_paths() == []
+    assert window.results_model.checked_paths() == []
+
+
+def test_operations_use_the_visible_grouping(window, tmp_path, monkeypatch):
+    """Удаление в режиме «по файлам» берёт галочки этой же таблицы."""
+    from PySide6.QtWidgets import QMessageBox
+
+    victim = tmp_path / "secret.txt"
+    victim.write_text("секретно", encoding="utf-8")
+    window._on_results_found([
+        SearchResult(victim.name, str(victim), "секрет", "секретно", "txt", "2026")
+    ])
+
+    window.group_by_file_radio.setChecked(True)
+    window.files_model.set_all_checked(True)
+    assert window._checked_paths() == [str(victim)]
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
+
+    window._secure_delete_checked()
+    assert window.secure_worker is not None
+    window.secure_worker.wait(30_000)
+    qt_app_process_events(window)
+
+    assert not victim.exists()
+
+
+def test_destructive_buttons_live_in_their_own_box(window):
+    """Необратимые операции отделены рамкой от копирования и экспорта."""
+    from PySide6.QtWidgets import QGroupBox
+
+    def _box_of(button):
+        parent = button.parent()
+        while parent is not None and not isinstance(parent, QGroupBox):
+            parent = parent.parent()
+        return parent
+
+    danger_box = _box_of(window.secure_delete_btn)
+    assert danger_box is not None
+    assert danger_box is _box_of(window.secure_move_btn)
+    assert "Безопасные операции" in danger_box.title()
+
+    # Обычное копирование остаётся снаружи опасной рамки.
+    assert _box_of(window.copy_btn) is not danger_box
+
+
+def test_summary_counts_files_not_rows(window):
+    """В режиме совпадений строк больше, чем файлов, — счётчик про файлы."""
+    window._on_results_found([
+        SearchResult("a.txt", "/x/a.txt", "договор", "про договор", "txt", "2026"),
+        SearchResult("a.txt", "/x/a.txt", "акт", "про акт", "txt", "2026"),
+    ])
+    window._set_all_checked(True)
+
+    assert window.results_model.rowCount() == 2
+    assert "отмечено файлов: 1" in window.checked_summary_label.text()
+
+
+def test_tab_title_shows_the_number_of_files(window):
+    _feed_context(window, TYPICAL_CONTEXT)
+    assert window.tabs.tabText(0) == "Результаты (1)"
+
+
+def Qt_checked():
+    from PySide6.QtCore import Qt
+
+    return Qt.Checked
+
+
+def Qt_check_role():
+    from PySide6.QtCore import Qt
+
+    return Qt.CheckStateRole
+
+
+def test_disabled_coloured_buttons_look_disabled(qt_app):
+    """Заблокированная «Безопасно удалить» не должна оставаться красной.
+
+    У #dangerButton и #primaryButton фон задан явно, и общее правило
+    QPushButton:disabled его не перебивает — кнопка выглядела нажимаемой,
+    хотя ничего не делала. Для необратимого удаления это опаснее всего.
+    """
+    from app.gui.theme import apply_modern_theme
+
+    apply_modern_theme(qt_app)
+    style = qt_app.styleSheet()
+
+    assert "QPushButton#dangerButton:disabled" in style
+    assert "QPushButton#primaryButton:disabled" in style
+
+
+def test_danger_zone_has_its_own_frame_style(qt_app):
+    """Рамка необратимых операций отличается от обычных групп."""
+    from app.gui.theme import apply_modern_theme
+
+    apply_modern_theme(qt_app)
+    assert "QGroupBox#dangerZoneBox" in qt_app.styleSheet()
