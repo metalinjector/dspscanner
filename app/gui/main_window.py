@@ -88,8 +88,9 @@ from app.config import (
 )
 from app.gui.results_model import (
     ResultsTableModel,
+    FilesTableModel,
     HighlightDelegate,
-    file_tooltip_html,
+    CheckboxDelegate,
 )
 from app.gui.workers import (
     ScanWorker,
@@ -119,7 +120,10 @@ from app.scan_config_store import (
 )
 
 
-_CONTEXT_COLUMN_INDEX = 3
+# Индексы колонок в ResultsTableModel (первая — галочка).
+_CHECK_COLUMN_INDEX = 0
+_OCCURENCES_COLUMN_INDEX = 3
+_CONTEXT_COLUMN_INDEX = 4
 _CONTEXT_COLUMN_MIN_WIDTH = 260
 _CONTEXT_COLUMN_MAX_WIDTH = 900
 # Поля ячейки в делегате подсветки плюс запас на полужирные фрагменты
@@ -204,7 +208,7 @@ class MainWindow(QMainWindow):
         self.qt_log_handler = qt_log_handler
         self.settings_store = QSettings("DSPScanner", "DSPScanner")
 
-        self.setWindowTitle("DSP Scanner — поиск текста в документах")
+        self.setWindowTitle(f"DSP Scanner {APP_VERSION} — поиск текста в документах")
         self.resize(1400, 880)
         self.setMinimumSize(1100, 700)
 
@@ -219,6 +223,16 @@ class MainWindow(QMainWindow):
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy_model.setDynamicSortFilter(False)
 
+        # Подробная таблица файлов: синхронизируется с результатами по мере
+        # их поступления. Прокси-модель даёт сортировку и фильтрацию как в
+        # вкладке «Результаты».
+        self.files_model = FilesTableModel(self)
+        self.files_proxy_model = QSortFilterProxyModel(self)
+        self.files_proxy_model.setSourceModel(self.files_model)
+        self.files_proxy_model.setFilterKeyColumn(-1)
+        self.files_proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.files_proxy_model.setDynamicSortFilter(False)
+
         self.scan_worker: Optional[ScanWorker] = None
         self.copy_worker: Optional[CopyWorker] = None
         self.secure_worker: Optional[SecureOpWorker] = None
@@ -230,7 +244,6 @@ class MainWindow(QMainWindow):
         self.last_report: Optional[ScanReport] = None
         self.last_search_info: dict = {}
         self._active_search_info: dict = {}
-        self._found_file_paths: set[str] = set()
         self._unreadable_entries = []
         self.email_settings = EmailSettings()
         self._closing_after_scan = False
@@ -811,7 +824,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(False)
         for index, width in enumerate(
-            (220, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 320)
+            (34, 220, 140, 150, _CONTEXT_COLUMN_MIN_WIDTH, 80, 155, 320)
         ):
             self.results_table.setColumnWidth(index, width)
         # Ширина «Контекста» подгоняется под реальные строки, а не берётся
@@ -822,10 +835,11 @@ class MainWindow(QMainWindow):
         # тысяч.
         header.sectionResized.connect(self._on_results_section_resized)
 
+        self.results_table.setItemDelegateForColumn(0, CheckboxDelegate(self))
         self.results_table.setItemDelegateForColumn(
-            0, HighlightDelegate(filename_column=True)
+            1, HighlightDelegate(filename_column=True)
         )
-        self.results_table.setItemDelegateForColumn(3, HighlightDelegate())
+        self.results_table.setItemDelegateForColumn(4, HighlightDelegate())
 
         self.results_table.clicked.connect(self._on_result_table_clicked)
         self.results_table.doubleClicked.connect(self._open_selected_result)
@@ -834,6 +848,46 @@ class MainWindow(QMainWindow):
             self._show_results_context_menu
         )
         layout.addWidget(self.results_table, 1)
+
+        # Галочки на строках: отметка файлов для безопасных операций.
+        results_select_row = QHBoxLayout()
+        results_select_row.setContentsMargins(0, 6, 0, 0)
+        results_select_row.setSpacing(8)
+        results_select_all_btn = QPushButton("Отметить все")
+        results_select_all_btn.setToolTip("Отметить галочками все строки результатов")
+        results_clear_all_btn = QPushButton("Снять все")
+        results_clear_all_btn.setToolTip("Снять все галочки")
+        results_select_all_btn.clicked.connect(
+            lambda: self.results_model.set_all_checked(True)
+        )
+        results_clear_all_btn.clicked.connect(
+            lambda: self.results_model.set_all_checked(False)
+        )
+        self.results_secure_delete_btn = QPushButton("Безопасно удалить отмеченные")
+        self.results_secure_delete_btn.setObjectName("dangerButton")
+        self.results_secure_delete_btn.setToolTip(
+            "Многократно перезаписать и удалить файлы отмеченных строк (необратимо)"
+        )
+        self.results_secure_delete_btn.clicked.connect(
+            self._results_secure_delete_checked
+        )
+        self.results_secure_move_btn = QPushButton("Безопасно переместить отмеченные…")
+        self.results_secure_move_btn.setToolTip(
+            "Создать копии в выбранной папке, затем перезаписать и удалить оригиналы"
+        )
+        self.results_secure_move_btn.clicked.connect(
+            self._results_secure_move_checked
+        )
+        for b in (
+            results_select_all_btn,
+            results_clear_all_btn,
+            self.results_secure_delete_btn,
+            self.results_secure_move_btn,
+        ):
+            b.setMinimumHeight(32)
+            results_select_row.addWidget(b)
+        results_select_row.addStretch(1)
+        layout.addLayout(results_select_row)
 
         export_row = QHBoxLayout()
         export_row.setContentsMargins(0, 6, 0, 4)
@@ -869,11 +923,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         info_label = QLabel(
-            "Найденные файлы появляются здесь сразу во время сканирования. "
-            "Отображаются уникальные полные пути из столбца «Путь» вкладки «Результаты». "
-            "Наведите курсор на файл, чтобы увидеть расширенные контексты совпадений. "
-            "Все вхождения доступны по нажатию на число во вкладке «Результаты». "
-            "Отметьте нужные файлы чекбоксами слева."
+            "Найденные файлы появляются здесь сразу во время сканирования — "
+            "по одной строке на файл, с количеством совпадений, контекстом, "
+            "типом и датой изменения, как во вкладке «Результаты». "
+            "Наведите курсор, чтобы увидеть расширенные фрагменты. "
+            "Отметьте нужные файлы галочками слева — копирование и безопасные "
+            "операции работают по отмеченным."
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: #9AA3B2; padding: 4px;")
@@ -886,20 +941,47 @@ class MainWindow(QMainWindow):
         select_all_btn.setToolTip("Выбрать все файлы в списке")
         clear_all_btn = QPushButton("Снять все")
         clear_all_btn.setToolTip("Снять выделение со всех файлов")
-        select_all_btn.clicked.connect(lambda: self._set_all_found_checked(True))
-        clear_all_btn.clicked.connect(lambda: self._set_all_found_checked(False))
+        select_all_btn.clicked.connect(
+            lambda: self.files_model.set_all_checked(True)
+        )
+        clear_all_btn.clicked.connect(
+            lambda: self.files_model.set_all_checked(False)
+        )
+        files_filter = QLineEdit()
+        files_filter.setPlaceholderText("Фильтр по любому столбцу…")
+        files_filter.setMaximumWidth(360)
+        files_filter.textChanged.connect(
+            self.files_proxy_model.setFilterFixedString
+        )
         select_row.addWidget(select_all_btn)
         select_row.addWidget(clear_all_btn)
         select_row.addStretch(1)
+        select_row.addWidget(files_filter)
         layout.addLayout(select_row)
 
-        self.found_files_list = QListWidget()
-        self.found_files_list.setSelectionMode(QAbstractItemView.NoSelection)
-        self.found_files_list.setAlternatingRowColors(True)
-        self.found_files_list.itemDoubleClicked.connect(
-            lambda item: self._open_path(item.data(Qt.UserRole) or item.text())
+        self.found_files_table = QTableView()
+        self.found_files_table.setModel(self.files_proxy_model)
+        self.found_files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.found_files_table.setSortingEnabled(True)
+        self.found_files_table.setAlternatingRowColors(True)
+        self.found_files_table.setShowGrid(True)
+        self.found_files_table.verticalHeader().setVisible(False)
+        self.found_files_table.verticalHeader().setDefaultSectionSize(24)
+        self.found_files_table.setWordWrap(False)
+        files_header = self.found_files_table.horizontalHeader()
+        files_header.setSectionResizeMode(QHeaderView.Interactive)
+        files_header.setStretchLastSection(False)
+        for index, width in enumerate((34, 320, 90, 420, 80, 155, 380)):
+            self.found_files_table.setColumnWidth(index, width)
+        self.found_files_table.setItemDelegateForColumn(0, CheckboxDelegate(self))
+        self.found_files_table.doubleClicked.connect(
+            self._open_found_file_row
         )
-        layout.addWidget(self.found_files_list, 1)
+        self.found_files_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.found_files_table.customContextMenuRequested.connect(
+            self._show_files_context_menu
+        )
+        layout.addWidget(self.found_files_table, 1)
 
         copy_box = QGroupBox("Копирование отмеченных файлов")
         copy_layout = QHBoxLayout(copy_box)
@@ -1421,8 +1503,7 @@ class MainWindow(QMainWindow):
         for card in self.stat_cards.values():
             card.set_value(0)
         self.results_model.clear()
-        self.found_files_list.clear()
-        self._found_file_paths.clear()
+        self.files_model.clear()
         self._update_files_tab_title()
         self._unreadable_entries = []
         self._update_unreadable_files_button()
@@ -1446,8 +1527,7 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self._active_search_info = build_search_info(settings)
         self.results_model.clear()
-        self.found_files_list.clear()
-        self._found_file_paths.clear()
+        self.files_model.clear()
         self._update_files_tab_title()
         self._unreadable_entries = []
         self._update_unreadable_files_button()
@@ -1573,8 +1653,8 @@ class MainWindow(QMainWindow):
         follow_tail = scrollbar.value() >= max(0, scrollbar.maximum() - 2)
         self.results_model.add_results(results)
 
-        for result in results:
-            self._add_found_file_path(result.full_path)
+        # «Файлы» обновляются инкрементально по мере поступления результатов.
+        self._populate_found_files()
 
         self._auto_fit_context_column()
 
@@ -1731,7 +1811,7 @@ class MainWindow(QMainWindow):
 
     def _on_result_table_clicked(self, proxy_index) -> None:
         """Открывает все контексты при нажатии на число совпадений."""
-        if not proxy_index.isValid() or proxy_index.column() != 2:
+        if not proxy_index.isValid() or proxy_index.column() != _OCCURENCES_COLUMN_INDEX:
             return
         source_index = self.proxy_model.mapToSource(proxy_index)
         results = self.results_model.group_results_at(source_index.row())
@@ -1739,8 +1819,12 @@ class MainWindow(QMainWindow):
             ResultContextsDialog(results, self).exec()
 
     def _open_selected_result(self, proxy_index=None) -> None:
-        # Двойной щелчок по счётчику не должен одновременно открывать файл.
-        if proxy_index is not None and proxy_index.isValid() and proxy_index.column() == 2:
+        # Двойной щелчок по счётчику или галочке не должен открывать файл.
+        if (
+            proxy_index is not None
+            and proxy_index.isValid()
+            and proxy_index.column() in (_OCCURENCES_COLUMN_INDEX, _CHECK_COLUMN_INDEX)
+        ):
             return
         result = self._current_result()
         if result:
@@ -1761,6 +1845,7 @@ class MainWindow(QMainWindow):
         copy_context_action = menu.addAction("Копировать контекст")
         menu.addSeparator()
         select_all_action = menu.addAction("Выделить все совпадения в этом файле")
+        check_file_action = menu.addAction("Отметить все строки этого файла галочкой")
 
         if result is None:
             for a in (
@@ -1769,6 +1854,7 @@ class MainWindow(QMainWindow):
                 copy_path_action,
                 copy_context_action,
                 select_all_action,
+                check_file_action,
             ):
                 a.setEnabled(False)
 
@@ -1793,6 +1879,12 @@ class MainWindow(QMainWindow):
                     idx = self.results_model.index(row, 0)
                     proxy_idx = self.proxy_model.mapFromSource(idx)
                     self.results_table.selectRow(proxy_idx.row())
+        elif action == check_file_action and result:
+            for row in range(self.results_model.rowCount()):
+                r = self.results_model.result_at(row)
+                if r.full_path == result.full_path:
+                    idx = self.results_model.index(row, _CHECK_COLUMN_INDEX)
+                    self.results_model.setData(idx, Qt.Checked, Qt.CheckStateRole)
 
     @staticmethod
     def _open_path(path: str) -> None:
@@ -1899,65 +1991,61 @@ class MainWindow(QMainWindow):
     # Действия на вкладке "Файлы"
     # ------------------------------------------------------------------ #
     def _populate_found_files(self) -> None:
-        expected_paths = self.results_model.unique_paths()
-        expected_set = set(expected_paths)
-
-        # Удаляем только устаревшие строки и не сбрасываем галочки у файлов,
-        # которые уже появились во время сканирования.
-        for index in range(self.found_files_list.count() - 1, -1, -1):
-            item = self.found_files_list.item(index)
-            full_path = str(item.data(Qt.UserRole) or item.text())
-            if full_path not in expected_set:
-                self.found_files_list.takeItem(index)
-                self._found_file_paths.discard(full_path)
+        """Синхронизирует таблицу «Файлы» с моделью результатов."""
+        self.files_model.sync_with_results(self.results_model)
         self._update_files_tab_title()
 
-        for full_path in self.results_model.unique_paths():
-            self._add_found_file_path(full_path)
-
-    def _add_found_file_path(self, full_path: str) -> None:
-        """Добавляет путь или обновляет его rich-text подсказку с контекстами."""
-        if not full_path:
+    def _open_found_file_row(self, proxy_index=None) -> None:
+        if proxy_index is None or not proxy_index.isValid():
             return
+        if proxy_index.column() == 0:
+            return
+        source = self.files_proxy_model.mapToSource(proxy_index)
+        if not source.isValid():
+            return
+        self._open_path(self.files_model.path_at_source(source.row()))
 
-        tooltip = file_tooltip_html(
-            full_path,
-            self.results_model.results_for_path(full_path),
+    def _current_found_result(self):
+        indexes = self.found_files_table.selectionModel().selectedRows()
+        if not indexes:
+            return None
+        source = self.files_proxy_model.mapToSource(indexes[0])
+        if not source.isValid():
+            return None
+        return self.files_model.primary_at_source(source.row())
+
+    def _show_files_context_menu(self, position) -> None:
+        result = self._current_found_result()
+        menu = QMenu(self)
+        open_file_action = menu.addAction("Открыть файл")
+        open_folder_action = menu.addAction("Открыть папку файла")
+        menu.addSeparator()
+        copy_path_action = menu.addAction("Копировать полный путь")
+        if result is None:
+            for a in (open_file_action, open_folder_action, copy_path_action):
+                a.setEnabled(False)
+        action = menu.exec(
+            self.found_files_table.viewport().mapToGlobal(position)
         )
-        if full_path in self._found_file_paths:
-            for index in range(self.found_files_list.count()):
-                item = self.found_files_list.item(index)
-                if str(item.data(Qt.UserRole) or item.text()) == full_path:
-                    item.setToolTip(tooltip)
-                    break
+        if action is None or result is None:
             return
-
-        item = QListWidgetItem(full_path)
-        item.setData(Qt.UserRole, full_path)
-        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-        item.setCheckState(Qt.Unchecked)
-        item.setToolTip(tooltip)
-        self.found_files_list.addItem(item)
-        self._found_file_paths.add(full_path)
-        self._update_files_tab_title()
+        if action == open_file_action:
+            self._open_path(result.full_path)
+        elif action == open_folder_action:
+            self._open_path(str(Path(result.full_path).parent))
+        elif action == copy_path_action:
+            QApplication.clipboard().setText(
+                result.full_path, QClipboard.Clipboard
+            )
+            self.status_bar.showMessage("Путь скопирован в буфер обмена")
 
     def _update_files_tab_title(self) -> None:
         """Число найденных файлов видно на самой вкладке, не только по её содержимому."""
-        count = self.found_files_list.count()
+        count = self.files_model.count()
         self.tabs.setTabText(1, f"Файлы ({count})" if count else "Файлы")
 
-    def _set_all_found_checked(self, checked: bool) -> None:
-        state = Qt.Checked if checked else Qt.Unchecked
-        for index in range(self.found_files_list.count()):
-            self.found_files_list.item(index).setCheckState(state)
-
     def _checked_found_paths(self) -> List[str]:
-        paths: List[str] = []
-        for index in range(self.found_files_list.count()):
-            item = self.found_files_list.item(index)
-            if item.checkState() == Qt.Checked:
-                paths.append(str(item.data(Qt.UserRole) or item.text()))
-        return paths
+        return self.files_model.checked_paths()
 
     def _browse_copy_dest(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -2107,29 +2195,115 @@ class MainWindow(QMainWindow):
     def _set_secure_controls_enabled(self, enabled: bool) -> None:
         self.secure_delete_btn.setEnabled(enabled)
         self.secure_move_btn.setEnabled(enabled)
+        self.results_secure_delete_btn.setEnabled(enabled)
+        self.results_secure_move_btn.setEnabled(enabled)
         self.copy_btn.setEnabled(enabled)
 
+    def _file_op_running(self) -> bool:
+        return any(
+            worker is not None and worker.isRunning()
+            for worker in (
+                self.copy_worker,
+                self.secure_worker,
+                self.error_copy_worker,
+                self.error_secure_worker,
+            )
+        )
+
+    def _results_secure_delete_checked(self) -> None:
+        """Безопасное удаление из вкладки «Результаты» по галочкам."""
+        if self._file_op_running():
+            QMessageBox.information(
+                self, "Операция", "Файловая операция уже выполняется."
+            )
+            return
+        paths = self.results_model.checked_paths()
+        if not paths:
+            QMessageBox.information(
+                self,
+                "Нет отмеченных строк",
+                "Отметьте строки результатов галочками слева.",
+            )
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Необратимое удаление",
+            f"Безопасно удалить {len(paths)} файлов, отмеченных во вкладке «Результаты»?\n\n"
+            "Оригиналы будут многократно перезаписаны и удалены. Действие необратимо.",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.secure_worker = SecureOpWorker(
+            "delete", paths, passes=load_settings().secure_passes
+        )
+        self.secure_worker.finished_ok.connect(
+            lambda result: self._on_secure_finished("удалено", result)
+        )
+        self.secure_worker.failed.connect(self._on_secure_failed)
+        self._set_secure_controls_enabled(False)
+        self.secure_worker.start()
+
+    def _results_secure_move_checked(self) -> None:
+        """Безопасное перемещение из вкладки «Результаты» по галочкам."""
+        if self._file_op_running():
+            QMessageBox.information(
+                self, "Операция", "Файловая операция уже выполняется."
+            )
+            return
+        paths = self.results_model.checked_paths()
+        if not paths:
+            QMessageBox.information(
+                self,
+                "Нет отмеченных строк",
+                "Отметьте строки результатов галочками слева.",
+            )
+            return
+        destination = QFileDialog.getExistingDirectory(
+            self, "Куда безопасно переместить файлы"
+        )
+        if not destination:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Безопасное перемещение",
+            f"Переместить {len(paths)} файлов, отмеченных во вкладке «Результаты», в:\n{destination}\n\n"
+            "Сначала будет создана новая копия, затем оригинал будет многократно "
+            "перезаписан и удалён с прежнего места.",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.secure_worker = SecureOpWorker(
+            "move",
+            paths,
+            destination,
+            passes=load_settings().secure_passes,
+        )
+        self.secure_worker.finished_ok.connect(
+            lambda result: self._on_secure_finished("перемещено", result)
+        )
+        self.secure_worker.failed.connect(self._on_secure_failed)
+        self._set_secure_controls_enabled(False)
+        self.secure_worker.start()
+
     def _refresh_found_files_after_operation(self) -> None:
+        """Убирает из моделей строки отсутствующих на диске файлов."""
         removed_paths: set[str] = set()
-        for index in range(self.found_files_list.count() - 1, -1, -1):
-            item = self.found_files_list.item(index)
-            source_text = str(item.data(Qt.UserRole) or item.text())
-            if not Path(source_text).exists():
-                removed_paths.add(source_text)
-                self.found_files_list.takeItem(index)
-                self._found_file_paths.discard(source_text)
-        if removed_paths:
-            self.results_model.remove_paths(removed_paths)
-            if self.last_report is not None:
-                self.last_report.results = [
-                    result
-                    for result in self.last_report.results
-                    if result.full_path not in removed_paths
-                ]
-                self.last_report.stats.found = len(self.last_report.results)
-                self.stat_cards["found"].set_value(self.last_report.stats.found)
-        if removed_paths:
-            self._update_files_tab_title()
+        for path in self.results_model.unique_paths():
+            if not Path(path).exists():
+                removed_paths.add(path)
+        if not removed_paths:
+            return
+        self.results_model.remove_paths(removed_paths)
+        self.files_model.remove_paths(removed_paths)
+        if self.last_report is not None:
+            self.last_report.results = [
+                result
+                for result in self.last_report.results
+                if result.full_path not in removed_paths
+            ]
+            self.last_report.stats.found = len(self.last_report.results)
+            self.stat_cards["found"].set_value(self.last_report.stats.found)
+        self._update_files_tab_title()
 
     def _on_secure_finished(self, action: str, result: OperationResult) -> None:
         self._set_secure_controls_enabled(True)

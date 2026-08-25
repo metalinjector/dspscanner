@@ -32,3 +32,6 @@ Tesseract-OCR/
 
 # Logs
 *.log
+
+# Nuitka crash reports (build artifacts, not source)
+nuitka-crash-report.xml

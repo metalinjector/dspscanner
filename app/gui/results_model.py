@@ -16,11 +16,18 @@ import re
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics
-from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtWidgets import (
+    QApplication,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionButton,
+    QStyleOptionViewItem,
+)
 
 from app.config import SearchResult
 
 _HEADERS = [
+    "✓",
     "Файл",
     "Слово",
     "Кол-во совпадений",
@@ -45,6 +52,46 @@ MatchRole = Qt.UserRole + 1
 PathRole = Qt.UserRole + 2
 FilenameMatchRole = Qt.UserRole + 3
 OccurrencesRole = Qt.UserRole + 4
+# Полный путь независимо от колонки (нужен делегату чекбокса).
+FileIdRole = Qt.UserRole + 5
+# Индекс столбца чекбоксов.
+_CHECK_COLUMN = 0
+
+
+class CheckboxDelegate(QStyledItemDelegate):
+    """Центрированный чекбокс для колонки ✓.
+
+    Индикатор рисуется вручную: стандартный QTableView рисует его только у
+    редактируемых ячеек. Клик внутри колонки переключает состояние через модель.
+    """
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        opt.text = ""
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+        indicator_opt = QStyleOptionButton(opt)
+        indicator_opt.state = QStyle.State_Enabled
+        indicator_opt.state |= (
+            QStyle.State_On if opt.checkState == Qt.Checked else QStyle.State_Off
+        )
+        rect = style.subElementRect(
+            QStyle.SE_CheckBoxIndicator, indicator_opt, widget
+        )
+        rect.moveCenter(opt.rect.center())
+        indicator_opt.rect = rect
+        style.drawControl(QStyle.CE_CheckBox, indicator_opt, painter, widget)
+
+    def editorEvent(self, event, model, option, index):
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.MouseButtonRelease:
+            current = index.data(Qt.CheckStateRole)
+            new_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+            model.setData(index, new_state, Qt.CheckStateRole)
+            return True
+        return False
 
 
 @dataclass
@@ -238,6 +285,8 @@ class ResultsTableModel(QAbstractTableModel):
         self._groups: list[_ResultGroup] = []
         self._group_rows: dict[tuple[str, str], int] = {}
         self._all_results: list[SearchResult] = []
+        # Отмеченные галочкой строки по (путь, слово).
+        self._checked_keys: set[tuple[str, str]] = set()
         # Индексы для уточнения одинаковых имён файлов. Поддерживаются на
         # лету: имя может стать неоднозначным уже после того, как его строки
         # показаны, и тогда подписи нужно обновить, а не пересобирать таблицу.
@@ -301,6 +350,7 @@ class ResultsTableModel(QAbstractTableModel):
         col = index.column()
         if role == Qt.DisplayRole:
             values = [
+                "",
                 self.display_name(primary.full_path, primary.file_name),
                 primary.word,
                 len(group.results),
@@ -310,31 +360,122 @@ class ResultsTableModel(QAbstractTableModel):
                 primary.full_path,
             ]
             return values[col]
+        if role == Qt.CheckStateRole and col == _CHECK_COLUMN:
+            key = self._key(primary)
+            return Qt.Checked if key in self._checked_keys else Qt.Unchecked
         if role == Qt.ToolTipRole:
             return group_tooltip_html(group.results)
-        if role == Qt.TextAlignmentRole and col == 2:
+        if role == Qt.TextAlignmentRole and col == 3:
             return int(Qt.AlignCenter)
-        if role == Qt.ForegroundRole and col == 2:
+        if role == Qt.ForegroundRole and col == 3:
             return QColor(CONTENT_MATCH_COLOR)
-        if role == Qt.FontRole and col == 2:
+        if role == Qt.FontRole and col == 3:
             font = QFont()
             font.setBold(True)
             font.setUnderline(True)
             return font
         if role == MatchRole:
-            if col == 0 and group.filename_result is not None:
+            if col == 1 and group.filename_result is not None:
                 item = group.filename_result
                 return item.matched_text or item.word
             return primary.matched_text or primary.word
         if role == PathRole:
             return primary.full_path
+        if role == FileIdRole:
+            return primary.full_path
         if role == FilenameMatchRole:
-            if col == 0:
+            if col == 1:
                 return group.filename_result is not None
             return is_filename_match(primary)
         if role == OccurrencesRole:
             return tuple(group.results)
         return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+        flags = super().flags(index)
+        if index.isValid() and index.column() == _CHECK_COLUMN:
+            flags |= Qt.ItemIsUserCheckable
+            flags &= ~Qt.ItemIsEditable
+        return flags
+
+    def setData(self, index: QModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
+        if not index.isValid() or index.column() != _CHECK_COLUMN:
+            return False
+        if role != Qt.CheckStateRole:
+            return False
+        group = self._groups[index.row()]
+        key = self._key(group.primary)
+        if value == Qt.Checked:
+            changed = key not in self._checked_keys
+            self._checked_keys.add(key)
+        else:
+            changed = key in self._checked_keys
+            self._checked_keys.discard(key)
+        if changed:
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+        return True
+
+    def set_all_checked(self, checked: bool) -> None:
+        """Проставляет/снимает галочки на всех строках одним сигналом."""
+        if not self._groups:
+            return
+        if checked:
+            self._checked_keys = set(self._group_rows)
+        else:
+            if not self._checked_keys:
+                return
+            self._checked_keys.clear()
+        self.dataChanged.emit(
+            self.index(0, _CHECK_COLUMN),
+            self.index(self.rowCount() - 1, _CHECK_COLUMN),
+            [Qt.CheckStateRole],
+        )
+
+    def checked_paths(self) -> list[str]:
+        """Уникальные полные пути, отмеченные галочками."""
+        seen: list[str] = []
+        seen_set: set[str] = set()
+        for key in self._checked_keys:
+            path = key[0]
+            if path not in seen_set and key in self._group_rows:
+                seen_set.add(path)
+                seen.append(path)
+        return seen
+
+    def has_checked(self) -> bool:
+        return bool(
+            set(key[0] for key in self._checked_keys)
+            & set(key[0] for key in self._group_rows)
+        )
+
+    def remove_checked(self) -> set[str]:
+        """Сбрасывает модель без отмеченных строк; возвращает их пути."""
+        checked_keys = set(self._checked_keys)
+        if not checked_keys:
+            return set()
+        removed_paths = {key[0] for key in checked_keys}
+        remaining = [
+            row
+            for row in self._all_results
+            if (row.full_path, row.word) not in checked_keys
+        ]
+        self.beginResetModel()
+        self._reset_state()
+        for result in remaining:
+            key = self._key(result)
+            row = self._group_rows.get(key)
+            if row is None:
+                row = len(self._groups)
+                self._group_rows[key] = row
+                self._groups.append(_ResultGroup(result.full_path, key[1], [result]))
+                self._register_row(row, result)
+            else:
+                self._groups[row].results.append(result)
+            self._all_results.append(result)
+            self._note_context(result)
+        self._refresh_labels(self._paths_by_name)
+        self.endResetModel()
+        return removed_paths
 
     def add_result(self, result: SearchResult) -> None:
         self.add_results([result])
@@ -402,6 +543,7 @@ class ResultsTableModel(QAbstractTableModel):
         self._rows_by_name = {}
         self._label_by_path = {}
         self._longest_context = ""
+        self._checked_keys = set()
 
     def result_at(self, row: int) -> SearchResult:
         return self._groups[row].primary
@@ -451,6 +593,218 @@ class ResultsTableModel(QAbstractTableModel):
         # больше не нужно, и подпись снова становится просто именем.
         self._refresh_labels(self._paths_by_name)
         self.endResetModel()
+
+
+@dataclass
+class _FileRow:
+    """Одна строка вкладки «Файлы»: файл + агрегированные совпадения."""
+
+    full_path: str
+    results: list[SearchResult] = field(default_factory=list)
+
+    @property
+    def primary(self) -> SearchResult:
+        return next(
+            (item for item in self.results if not is_filename_match(item)),
+            self.results[0],
+        )
+
+    @property
+    def occurrence_count(self) -> int:
+        return len(self.results)
+
+
+_FILE_HEADERS = ["✓", "Файл", "Совпадений", "Контекст", "Тип", "Изменён", "Путь"]
+
+
+class FilesTableModel(QAbstractTableModel):
+    """Подробная таблица файлов, как в разделе «Результаты».
+
+    Одна строка на уникальный путь; наполняется синхронно с ResultsTableModel.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: list[_FileRow] = []
+        self._row_by_path: dict[str, int] = {}
+        self._checked_paths: set[str] = set()
+        self._labels_dict: dict[str, str] = {}
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return len(_FILE_HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):  # noqa: N802
+        if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+            return None
+        return _FILE_HEADERS[section]
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Any:
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        primary = row.primary
+        col = index.column()
+        if role == Qt.DisplayRole:
+            values = [
+                "",
+                self._labels_dict.get(primary.full_path, Path(primary.full_path).name),
+                row.occurrence_count,
+                primary.context,
+                primary.file_type,
+                primary.modified,
+                primary.full_path,
+            ]
+            return values[col]
+        if role == Qt.CheckStateRole and col == _CHECK_COLUMN:
+            return (
+                Qt.Checked if row.full_path in self._checked_paths else Qt.Unchecked
+            )
+        if role == Qt.ToolTipRole:
+            return file_tooltip_html(row.full_path, row.results)
+        if role == Qt.TextAlignmentRole and col == 2:
+            return int(Qt.AlignCenter)
+        if role == Qt.ForegroundRole and col == 2:
+            return QColor(CONTENT_MATCH_COLOR)
+        if role == Qt.FontRole and col == 2:
+            font = QFont()
+            font.setBold(True)
+            font.setUnderline(True)
+            return font
+        if role in (PathRole, FileIdRole):
+            return row.full_path
+        if role == OccurrencesRole:
+            return tuple(row.results)
+        return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+        flags = super().flags(index)
+        if index.isValid() and index.column() == _CHECK_COLUMN:
+            flags |= Qt.ItemIsUserCheckable
+            flags &= ~Qt.ItemIsEditable
+        return flags
+
+    def setData(self, index: QModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
+        if not index.isValid() or index.column() != _CHECK_COLUMN:
+            return False
+        if role != Qt.CheckStateRole:
+            return False
+        row = self._rows[index.row()]
+        if value == Qt.Checked:
+            changed = row.full_path not in self._checked_paths
+            self._checked_paths.add(row.full_path)
+        else:
+            changed = row.full_path in self._checked_paths
+            self._checked_paths.discard(row.full_path)
+        if changed:
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+        return True
+
+    def sync_with_results(self, results_model: ResultsTableModel) -> None:
+        """Синхронизирует с моделью результатов: добавляет/обновляет строки.
+
+        Удаление происходит отдельно через :meth:`remove_paths` — в момент,
+        когда результаты уже отфильтрованы.
+        """
+        by_path: dict[str, list[SearchResult]] = {}
+        order: list[str] = []
+        for result in results_model.all_results():
+            if result.full_path not in by_path:
+                by_path[result.full_path] = []
+                order.append(result.full_path)
+            by_path[result.full_path].append(result)
+
+        paths_by_name: dict[str, set[str]] = {}
+        for path in order:
+            paths_by_name.setdefault(Path(path).name, set()).add(path)
+        labels: dict[str, str] = {}
+        for name, paths in paths_by_name.items():
+            labels.update(disambiguating_labels(name, paths))
+        if labels != self._labels_dict:
+            self._labels_dict = labels
+
+        new_items = [path for path in order if path not in self._row_by_path]
+        if new_items:
+            start = len(self._rows)
+            self.beginInsertRows(QModelIndex(), start, start + len(new_items) - 1)
+            for path in new_items:
+                row_index = len(self._rows)
+                self._row_by_path[path] = row_index
+                self._rows.append(_FileRow(path, by_path[path]))
+            self.endInsertRows()
+
+        changed_rows: set[int] = set()
+        for path, row_index in self._row_by_path.items():
+            fresh = by_path.get(path, [])
+            row = self._rows[row_index]
+            if row.results != fresh:
+                row.results = fresh
+                changed_rows.add(row_index)
+        for row_index in sorted(changed_rows):
+            self.dataChanged.emit(
+                self.index(row_index, 1),
+                self.index(row_index, 2),
+                [Qt.DisplayRole, Qt.ToolTipRole, OccurrencesRole],
+            )
+
+    def clear(self) -> None:
+        self.beginResetModel()
+        self._rows = []
+        self._row_by_path = {}
+        self._checked_paths = set()
+        self._labels_dict = {}
+        self.endResetModel()
+
+    def set_all_checked(self, checked: bool) -> None:
+        if not self._rows:
+            return
+        if checked:
+            self._checked_paths = set(self._row_by_path)
+        else:
+            if not self._checked_paths:
+                return
+            self._checked_paths.clear()
+        self.dataChanged.emit(
+            self.index(0, _CHECK_COLUMN),
+            self.index(self.rowCount() - 1, _CHECK_COLUMN),
+            [Qt.CheckStateRole],
+        )
+
+    def checked_paths(self) -> list[str]:
+        return [
+            path
+            for path, row_index in self._row_by_path.items()
+            if path in self._checked_paths
+        ]
+
+    def remove_paths(self, paths: set[str]) -> None:
+        if not paths:
+            return
+        remaining = [row for row in self._rows if row.full_path not in paths]
+        if len(remaining) == len(self._rows):
+            return
+        self.beginResetModel()
+        self._rows = []
+        self._row_by_path = {}
+        self._checked_paths -= paths
+        for row_index, row in enumerate(remaining):
+            self._row_by_path[row.full_path] = row_index
+            self._rows.append(row)
+        self.endResetModel()
+
+    def path_at_source(self, row: int) -> str:
+        return self._rows[row].full_path
+
+    def primary_at_source(self, row: int) -> SearchResult:
+        return self._rows[row].primary
+
+    def group_results_at(self, row: int) -> List[SearchResult]:
+        return list(self._rows[row].results)
+
+    def count(self) -> int:
+        return len(self._rows)
 
 
 class HighlightDelegate(QStyledItemDelegate):
