@@ -156,7 +156,16 @@ class SettingsDialog(QDialog):
         self.secure_passes.setRange(1, 7)
         self.secure_passes.setValue(s.secure_passes)
         sec_layout.addRow("Число проходов перезаписи:", self.secure_passes)
-        sec_layout.addRow(QLabel("Рекомендуется 3 прохода (DoD 5220.22-M)"))
+        # Прежняя подпись рекомендовала 3 прохода по DoD 5220.22-M. Этот
+        # стандарт устарел: NIST SP 800-88 считает одного прохода достаточным
+        # для HDD, а на SSD перезапись не помогает при любом числе проходов.
+        passes_hint = QLabel(
+            "Достаточно 1 прохода: современные стандарты (NIST SP 800-88) не\n"
+            "видят пользы в большем числе, а на SSD перезапись не даёт гарантии\n"
+            "при любом числе проходов. Больше проходов — дольше и износ диска."
+        )
+        passes_hint.setWordWrap(True)
+        sec_layout.addRow(passes_hint)
         scroll_layout.addWidget(sec_box)
         scroll_layout.addSpacing(6)
 

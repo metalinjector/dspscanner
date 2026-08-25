@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import stat as stat_module
 import tempfile
@@ -11,6 +12,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Sequence
+
+
+# Сколько раз переименовать файл перед удалением, чтобы затереть его имя в
+# записи каталога. Больше трёх смысла не имеет: журналируемые ФС всё равно
+# могут сохранить старые записи, и это ограничение не обходится из userspace.
+_RENAME_PASSES = 3
+_RENAME_COLLISION_RETRIES = 5
 
 
 @dataclass
@@ -169,6 +177,83 @@ def _clamp_passes(passes: int) -> int:
         return 3
 
 
+def _truncate_in_place(path: Path, expected_stat) -> None:
+    """Обнуляет длину файла после перезаписи содержимого.
+
+    Размер файла — тоже метаданные: по нему можно судить о том, что здесь
+    лежало. Усечение выполняется отдельным шагом и не считается критичным:
+    содержимое к этому моменту уже затёрто, поэтому любая ошибка здесь не
+    должна срывать само удаление.
+    """
+    flags = os.O_RDWR
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        opened_stat = os.fstat(fd)
+        if not stat_module.S_ISREG(opened_stat.st_mode):
+            raise OSError("путь не является обычным файлом")
+        expected_identity = _file_identity(expected_stat)
+        opened_identity = _file_identity(opened_stat)
+        if all(expected_identity) and opened_identity != expected_identity:
+            raise OSError("файл был заменён во время операции")
+        os.ftruncate(fd, 0)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _scrub_name(path: Path) -> Path:
+    """Несколько раз переименовывает файл случайным именем.
+
+    Имя файла само по себе раскрывает содержание («увольнение_иванова.docx»),
+    а после обычного unlink оно остаётся в записи каталога и может пережить
+    удаление. Так поступают штатные инструменты (`shred -u`, `srm`).
+
+    Переименование делается только после того, как содержимое уже затёрто,
+    поэтому неудача на любом шаге не опасна: возвращается последнее имя, по
+    которому файл реально существует, и удаление продолжается по нему.
+    """
+    current = path
+    for _ in range(_RENAME_PASSES):
+        # Имя той же длины, что и исходное: длина записи в каталоге тоже
+        # немного говорит об имени. Минимум — чтобы не получить пустое имя.
+        length = max(8, len(current.name))
+        for _attempt in range(_RENAME_COLLISION_RETRIES):
+            candidate = current.with_name(secrets.token_hex(32)[:length])
+            if candidate.exists():
+                continue
+            try:
+                current.rename(candidate)
+                current = candidate
+            except OSError:
+                # Каталог только для чтения, чужая ФС, гонка — не страшно:
+                # содержимое уже уничтожено, удаляем под текущим именем.
+                return current
+            break
+    return current
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Сбрасывает на диск саму запись каталога после удаления.
+
+    Без этого удаление может остаться только в кеше метаданных. На Windows
+    каталог открыть нельзя — там шаг просто пропускается.
+    """
+    try:
+        fd = os.open(directory, getattr(os, "O_DIRECTORY", os.O_RDONLY))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _unlink_verified(path: Path, expected_stat) -> None:
     current = path.lstat()
     if stat_module.S_ISLNK(current.st_mode) or not stat_module.S_ISREG(current.st_mode):
@@ -177,7 +262,25 @@ def _unlink_verified(path: Path, expected_stat) -> None:
     current_identity = _file_identity(current)
     if all(expected_identity) and current_identity != expected_identity:
         raise OSError("файл был заменён во время операции")
-    path.unlink()
+
+    # Содержимое уже перезаписано; дальше убираются остальные следы —
+    # размер и имя. Оба шага не критичны для самого удаления.
+    try:
+        _truncate_in_place(path, expected_stat)
+    except OSError:
+        pass
+    scrubbed = _scrub_name(path)
+
+    try:
+        scrubbed.unlink()
+    except OSError as exc:
+        if scrubbed != path:
+            # Иначе пользователь не найдёт остаток: имя уже случайное.
+            raise OSError(
+                f"{exc}; содержимое уничтожено, остался файл {scrubbed.name}"
+            ) from exc
+        raise
+    _fsync_directory(scrubbed.parent)
 
 
 def secure_delete_files(paths: Sequence[str], passes: int = 3) -> OperationResult:
