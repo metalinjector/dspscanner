@@ -1151,3 +1151,208 @@ def test_checkbox_indicator_fits_inside_the_narrow_column(qt_app):
     assert CheckboxDelegate._BOX_SIDE <= 34 - 4
     # Строка таблицы имеет высоту 24 px — индикатор должен в неё влезать.
     assert CheckboxDelegate._BOX_SIDE <= 24 - 4
+
+
+# --------------------------------------------------------------------- #
+# Списки ключевых слов: кнопка + модалка вместо двух textarea
+# --------------------------------------------------------------------- #
+
+
+def test_terms_field_keeps_the_text_api_of_the_old_editor(qt_app):
+    """Кнопка должна вести себя как прежний QTextEdit.
+
+    Сохранение настроек, автосохранение и запуск поиска работают с полем
+    как с текстом. Если API разойдётся, конфигурация молча перестанет
+    сохранять ключевые слова.
+    """
+    from app.gui.terms_field import TermsField
+
+    field = TermsField("Слова", "Диалог", "пусто")
+    field.setPlainText("пилот, служебная записка\nдоговор")
+
+    assert field.terms() == ["пилот", "служебная записка", "договор"]
+    # Ровно то, что уйдёт в настройки: по одному значению в строке.
+    assert field.toPlainText() == "пилот\nслужебная записка\nдоговор"
+
+    changes = []
+    field.textChanged.connect(lambda: changes.append(field.toPlainText()))
+    field.set_terms(["новое"])
+    assert changes == ["новое"]
+
+    # Повторная установка того же значения не должна дёргать автосохранение.
+    field.set_terms(["новое"])
+    assert len(changes) == 1
+
+
+def test_terms_field_button_shows_the_count_and_a_preview(qt_app):
+    """На кнопке видно, сколько терминов задано, без открытия модалки."""
+    from app.gui.terms_field import TermsField
+
+    field = TermsField("Слова в содержимом", "Диалог", "список пуст")
+    assert "список пуст" in field.text()
+
+    field.set_terms(["пилот", "договор", "секретно", "охрана", "приказ"])
+    label = field.text()
+    assert "5" in label
+    assert "пилот" in label
+    # Превью не обрывается посреди слова: остаток сворачивается в счётчик.
+    assert "и ещё" in label or "пилот, договор, секретно, охрана, приказ" in label
+
+
+def test_terms_dialog_adds_parses_and_deduplicates(qt_app):
+    """Поле ввода принимает несколько значений сразу и не плодит дубликаты."""
+    from app.gui.terms_field import TermsDialog
+
+    dialog = TermsDialog("Ключевые слова", ["договор"])
+
+    dialog.input.setText("пилот, служебная записка; охран*")
+    dialog._add_from_input()
+    assert dialog.terms() == ["договор", "пилот", "служебная записка", "охран*"]
+
+    # Регистр и «ё» не создают второй записи — как и в parse_terms.
+    dialog.input.setText("ДОГОВОР")
+    dialog._add_from_input()
+    assert dialog.terms().count("договор") == 1
+    assert len(dialog.terms()) == 4
+
+
+def test_terms_dialog_removes_only_checked_rows(qt_app):
+    """Удаляются отмеченные галочками строки, остальные остаются нетронутыми."""
+    from PySide6.QtCore import Qt as _Qt
+    from app.gui.terms_field import TermsDialog
+
+    dialog = TermsDialog("Ключевые слова", ["пилот", "договор", "секретно"])
+    dialog.list.item(1).setCheckState(_Qt.Checked)
+
+    dialog._remove_checked()
+
+    assert dialog.terms() == ["пилот", "секретно"]
+
+
+def test_terms_dialog_remove_button_needs_a_checkmark(qt_app):
+    """Без отметок «Удалить» заблокирована — нечего удалять."""
+    from PySide6.QtCore import Qt as _Qt
+    from app.gui.terms_field import TermsDialog
+
+    dialog = TermsDialog("Ключевые слова", ["пилот", "договор"])
+    assert not dialog.remove_btn.isEnabled()
+
+    dialog.list.item(0).setCheckState(_Qt.Checked)
+    assert dialog.remove_btn.isEnabled()
+
+    dialog._set_all_checked(False)
+    assert not dialog.remove_btn.isEnabled()
+
+
+def test_terms_dialog_rows_are_checkable(qt_app):
+    """Каждая строка списка — одно значение с чекбоксом."""
+    from PySide6.QtCore import Qt as _Qt
+    from app.gui.terms_field import TermsDialog
+
+    terms = ["пилот", "служебная записка", "договор"]
+    dialog = TermsDialog("Ключевые слова", terms)
+
+    assert dialog.list.count() == len(terms)
+    for row, term in enumerate(terms):
+        item = dialog.list.item(row)
+        assert item.text() == term
+        assert item.flags() & _Qt.ItemIsUserCheckable
+        assert item.checkState() == _Qt.Unchecked
+
+
+def test_terms_tooltip_scrolls_up_and_wraps_around(qt_app):
+    """Подсказка прокручивает перечень вверх, дойдя до конца — начинает заново."""
+    from app.gui.terms_field import TermsTooltip
+
+    tooltip = TermsTooltip()
+    tooltip.set_terms("Слова: 40", [f"термин {i}" for i in range(40)])
+    tooltip.start()
+
+    bar = tooltip._area.verticalScrollBar()
+    assert bar.maximum() > 0, "длинный список должен быть прокручиваемым"
+
+    tooltip._scroll_once()
+    assert bar.value() > 0, "перечень не поехал вверх"
+
+    bar.setValue(bar.maximum())
+    tooltip._scroll_once()
+    assert bar.value() == 0, "после конца список должен начинаться сначала"
+
+    tooltip.stop()
+    assert not tooltip._timer.isActive()
+
+
+def test_terms_tooltip_does_not_scroll_a_short_list(qt_app):
+    """Короткий список не дёргается: прокручивать нечего."""
+    from app.gui.terms_field import TermsTooltip
+
+    tooltip = TermsTooltip()
+    tooltip.set_terms("Слова: 2", ["пилот", "договор"])
+    tooltip.start()
+
+    assert not tooltip._timer.isActive()
+    tooltip.stop()
+
+
+def test_left_panel_uses_term_buttons_instead_of_text_areas(window):
+    """В левой панели больше нет многострочных полей ввода терминов."""
+    from PySide6.QtWidgets import QTextEdit
+    from app.gui.terms_field import TermsField
+
+    assert isinstance(window.words_edit, TermsField)
+    assert isinstance(window.filename_words_edit, TermsField)
+    assert not isinstance(window.words_edit, QTextEdit)
+
+
+def test_search_still_reads_terms_from_the_buttons(window):
+    """Поиск получает термины из кнопок — конвейер не заметил подмены."""
+    window.words_edit.set_terms(["пилот", "служебная записка"])
+    window.filename_words_edit.set_terms(["договор"])
+
+    settings = window._collect_settings()
+
+    assert settings.words == ["пилот", "служебная записка"]
+    assert settings.filename_words == ["договор"]
+
+
+def test_terms_survive_a_save_and_load_cycle(tmp_path, qt_app, monkeypatch):
+    """Список терминов переживает перезапуск приложения.
+
+    Настройки хранят термины строкой; после замены textarea на кнопку
+    сохранение и чтение должны сойтись, иначе ключевые слова тихо пропадут
+    при следующем запуске.
+    """
+    from app.logging_utils import setup_logger
+    from app.gui.main_window import MainWindow
+
+    logger, handler = setup_logger()
+
+    first = MainWindow(logger=logger, qt_log_handler=handler)
+    first.words_edit.set_terms(["пилот", "служебная записка"])
+    first.filename_words_edit.set_terms(["договор"])
+    first._auto_save_scan_config()
+    first.close()
+
+    second = MainWindow(logger=logger, qt_log_handler=handler)
+    try:
+        assert second.words_edit.terms() == ["пилот", "служебная записка"]
+        assert second.filename_words_edit.terms() == ["договор"]
+    finally:
+        second.close()
+
+
+def test_terms_dialog_shows_ruled_lines_when_empty(qt_app):
+    """Пустой список выглядит разлинованным листом, а не голой рамкой.
+
+    Разлиновку строк даёт QSS, но у пустого списка строк нет — по одной
+    рамке непонятно, что значения вносятся по одному в строку.
+    """
+    from app.gui.terms_field import RuledList, TermsDialog
+
+    dialog = TermsDialog("Ключевые слова", [])
+
+    assert isinstance(dialog.list, RuledList)
+    assert dialog.list._empty_hint, "нет подсказки о том, как заполнять список"
+    # Отрисовка пустого списка не должна падать.
+    dialog.list.resize(300, 200)
+    dialog.list.grab()

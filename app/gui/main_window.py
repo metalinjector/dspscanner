@@ -53,7 +53,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLabel,
     QLineEdit,
-    QTextEdit,
     QCheckBox,
     QComboBox,
     QSpinBox,
@@ -108,6 +107,7 @@ from app.gui.settings_dialog import SettingsDialog
 from app.gui.email_settings_dialog import EmailSettingsDialog
 from app.gui.unreadable_files_dialog import UnreadableFilesDialog
 from app.gui.result_contexts_dialog import ResultContextsDialog
+from app.gui.terms_field import TermsField
 from app.fileops.file_operations import CopyMapping, OperationResult
 from app.export.excel_export import export_to_excel
 from app.export.text_exports import export_to_csv, export_to_markdown
@@ -549,37 +549,48 @@ class MainWindow(QMainWindow):
             "«охран*» найдёт «охрана» и «охранник». Без включённого режима "
             "«Целые слова» обычная часть слова тоже находится: «пилот» найдёт «беспилотник»."
         )
-        layout.addWidget(
-            self._section_header(
-                "Ключевые слова / фразы внутри файлов",
-                "Как вводить ключевые слова",
-                terms_help,
-            )
-        )
-        self.words_edit = QTextEdit()
-        self.words_edit.setToolTip("Термины для поиска в содержимом документов")
-        self.words_edit.setPlaceholderText(
-            "содержимое: по одному в строке, через запятую или ;\nнапример: пилот, служебная записка"
-        )
-        self.words_edit.setMinimumHeight(66)
-        layout.addWidget(self.words_edit)
+        # Оба списка терминов — кнопки: перечень живёт в модалке, а на панели
+        # остаётся строка с количеством и первыми значениями. Два textarea
+        # занимали здесь ~150 px и почти всегда показывали неизменный текст.
+        terms_row = QHBoxLayout()
+        terms_row.setSpacing(8)
 
-        layout.addWidget(
+        content_terms_box = QVBoxLayout()
+        content_terms_box.setSpacing(4)
+        content_terms_box.addWidget(
             self._section_header(
-                "Ключевые слова / фразы в названиях файлов",
+                "Внутри файлов",
                 "Как вводить ключевые слова",
                 terms_help,
             )
         )
-        self.filename_words_edit = QTextEdit()
-        self.filename_words_edit.setToolTip(
-            "Термины для поиска только в названиях файлов"
+        self.words_edit = TermsField(
+            "Слова в содержимом",
+            "Ключевые слова / фразы внутри файлов",
+            "список пуст — нажмите, чтобы добавить",
         )
-        self.filename_words_edit.setPlaceholderText(
-            "названия файлов: по одному в строке, через запятую или ;\nпусто — поиск по названиям не выполняется"
+        content_terms_box.addWidget(self.words_edit)
+        terms_row.addLayout(content_terms_box, 1)
+
+        filename_terms_box = QVBoxLayout()
+        filename_terms_box.setSpacing(4)
+        filename_terms_box.addWidget(
+            self._section_header(
+                "В названиях файлов",
+                "Как вводить ключевые слова",
+                terms_help,
+            )
         )
-        self.filename_words_edit.setMinimumHeight(66)
-        layout.addWidget(self.filename_words_edit)
+        self.filename_words_edit = TermsField(
+            "Слова в названиях",
+            "Ключевые слова / фразы в названиях файлов",
+            "пусто — поиск по названиям не ведётся",
+        )
+        filename_terms_box.addWidget(self.filename_words_edit)
+        terms_row.addLayout(filename_terms_box, 1)
+
+        layout.addLayout(terms_row)
+
 
         layout.addWidget(self._divider())
 

@@ -27,6 +27,11 @@ BORDER_SUBTLE = "#3A4150"
 TEXT = "#E6E9EF"
 TEXT_MUTED = "#9AA3B2"
 DANGER = "#E5484D"
+# Бирюзовый — акцент списков ключевых слов. Отличается и от синего
+# (обычные действия), и от красного (необратимые операции).
+TERMS = "#2FB8A2"
+TERMS_BORDER = "#2B5F5C"
+BG_TERMS = "#172B2C"
 SUCCESS = "#3DD68C"
 WARNING = "#F2B84B"
 
@@ -207,6 +212,92 @@ QPushButton#toolButton {{
     min-height: 18px;
     padding: 4px 10px;
     font-weight: 500;
+}}
+
+/* Кнопки списков ключевых слов. Обведены так же заметно, как кнопки
+   необратимых операций, но бирюзовым: это не опасное действие, а вход в
+   редактор списка, и цвет не должен читаться как предупреждение. */
+QPushButton#termsButton {{
+    background-color: {BG_TERMS};
+    border: 1px solid {TERMS_BORDER};
+    border-radius: 10px;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: {TEXT};
+}}
+QPushButton#termsButton:hover {{
+    background-color: #1B3A3B;
+    border-color: {TERMS};
+}}
+QPushButton#termsButton:pressed {{
+    background-color: #142C2E;
+}}
+QPushButton#termsButton:disabled {{
+    background-color: {BG_CARD};
+    color: {TEXT_MUTED};
+    border-color: {BORDER_SUBTLE};
+}}
+
+QFrame#termsTooltip {{
+    background-color: {BG_PANEL};
+    border: 1px solid {TERMS_BORDER};
+    border-radius: 10px;
+}}
+QLabel#termsTooltipCaption {{
+    color: {TERMS};
+    font-weight: 700;
+}}
+QLabel#termsTooltipBody {{
+    color: {TEXT};
+}}
+QScrollArea#termsTooltipArea {{
+    background: transparent;
+    border: none;
+}}
+
+QDialog#termsDialog {{
+    background-color: {BG_DARK};
+}}
+QLabel#termsDialogHint, QLabel#termsDialogSummary {{
+    color: {TEXT_MUTED};
+    font-weight: 500;
+}}
+/* Разлинованный список: одна линия — одно значение. */
+QListWidget#termsList {{
+    background-color: {BG_PANEL};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 8px;
+    padding: 2px;
+    outline: none;
+}}
+QListWidget#termsList::item {{
+    min-height: 30px;
+    padding: 4px 8px;
+    border-bottom: 1px solid {BORDER_SUBTLE};
+    color: {TEXT};
+}}
+QListWidget#termsList::item:hover {{
+    background-color: {BG_CARD};
+}}
+/* Галочка удаления — того же вида, что и остальные чекбоксы приложения:
+   стандартный индикатор списка почти сливался с тёмным фоном строки. */
+QListWidget#termsList::indicator {{
+    width: 17px;
+    height: 17px;
+    border-radius: 5px;
+    border: 1px solid #7A8394;
+    background-color: #11151C;
+    margin-right: 4px;
+}}
+QListWidget#termsList::indicator:hover {{
+    border-color: #9BA5B7;
+    background-color: #171C24;
+}}
+QListWidget#termsList::indicator:checked {{
+    background-color: {DANGER};
+    border-color: {DANGER};
+    image: url({_CHECK_ICON});
 }}
 
 QPushButton#helpButton {{
