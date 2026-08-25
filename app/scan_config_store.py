@@ -1,6 +1,6 @@
 """Переносимое автоматическое хранение параметров поиска в JSON.
 
-Основной файл располагается в папке ``DSPScanner_Config`` рядом с программой.
+Основной файл располагается в папке ``DSPScanner-Config`` рядом с программой.
 Эту папку можно перенести на другой компьютер вместе с приложением: при
 следующем запуске поля поиска будут восстановлены из ``search_settings.json``.
 Если каталог программы недоступен для записи (например, Program Files),
@@ -15,7 +15,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-_CONFIG_DIR_NAME = "DSPScanner_Config"
+_CONFIG_DIR_NAME = "DSPScanner-Config"
+# Прежнее имя папки. Читается, если новой ещё нет: иначе после обновления
+# пользователь молча потерял бы сохранённые параметры поиска.
+_LEGACY_CONFIG_DIR_NAME = "DSPScanner_Config"
 _CONFIG_FILE_NAME = "search_settings.json"
 _MAX_CONFIG_BYTES = 5_000_000
 
@@ -36,6 +39,20 @@ def portable_config_dir() -> Path:
 
 def fallback_config_dir() -> Path:
     return Path.home() / "DSPScanner" / _CONFIG_DIR_NAME
+
+
+def legacy_config_dirs() -> tuple[Path, ...]:
+    """Папки со старым именем ``DSPScanner_Config``.
+
+    Используются только для чтения. Переменная окружения ``DSP_SCANNER_CONFIG_DIR``
+    задаёт каталог явно, поэтому при ней старые пути не подставляются.
+    """
+    if os.environ.get("DSP_SCANNER_CONFIG_DIR"):
+        return ()
+    return (
+        application_root() / _LEGACY_CONFIG_DIR_NAME,
+        Path.home() / "DSPScanner" / _LEGACY_CONFIG_DIR_NAME,
+    )
 
 
 def ensure_config_dir() -> Path:
@@ -71,12 +88,18 @@ def existing_auto_config_path() -> Path | None:
     Обычно существует только переносимая копия рядом с программой. Если эта
     папка стала read-only, новые изменения сохраняются в профиль пользователя;
     выбор по времени изменения предотвращает загрузку устаревшей копии.
+
+    Папки со старым именем ``DSPScanner_Config`` тоже просматриваются, чтобы
+    настройки пережили обновление. Новые данные всегда пишутся в папку с
+    актуальным именем.
     """
+    search_dirs = (
+        portable_config_dir(),
+        fallback_config_dir(),
+        *legacy_config_dirs(),
+    )
     candidates = [
-        path for path in (
-            portable_config_dir() / _CONFIG_FILE_NAME,
-            fallback_config_dir() / _CONFIG_FILE_NAME,
-        )
+        path for path in (directory / _CONFIG_FILE_NAME for directory in search_dirs)
         if path.is_file()
     ]
     if not candidates:

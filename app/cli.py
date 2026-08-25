@@ -40,7 +40,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="DSP Scanner",
         description=(
             "Поиск ключевых слов в DOCX, DOC, TXT и PDF без запуска графического интерфейса. "
-            "Параметры берутся из DSPScanner_Config/search_settings.json и могут быть "
+            "Параметры берутся из DSPScanner-Config/search_settings.json и могут быть "
             "переопределены ключами командной строки."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

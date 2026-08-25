@@ -219,7 +219,7 @@
 - Добавлен полноценный **CLI-режим без запуска Qt** для Windows Server,
   Планировщика заданий и автоматических cmd/bat/PowerShell-сценариев:
   `python main.py --cli ...` или `python main.py cli ...`.
-- CLI умеет загружать переносимый `DSPScanner_Config/search_settings.json`,
+- CLI умеет загружать переносимый `DSPScanner-Config/search_settings.json`,
   переопределять пути, термины, типы файлов, OCR, метод DOC, потоки, таймауты,
   формат/путь отчёта и создавать машинно-читаемый summary JSON.
 - Добавлен файл `CLI_COMMANDS.txt` с полным описанием всех ключей, примерами
@@ -281,7 +281,7 @@
 - Для контекста включены автоматический перенос, адаптивная ширина столбца
   и расчёт высоты строк.
 - Параметры поиска автоматически сохраняются в переносимый JSON
-  `DSPScanner_Config/search_settings.json` рядом с программой и загружаются
+  `DSPScanner-Config/search_settings.json` рядом с программой и загружаются
   при следующем запуске. Папку можно перенести на другой компьютер.
 - Увеличены отступы под заголовками групп в диалоге «Параметры».
 
@@ -530,7 +530,7 @@ python main.py
 
 ```bash
 python main.py --cli --help
-python main.py --cli --config DSPScanner_Config/search_settings.json --send-email
+python main.py --cli --config DSPScanner-Config/search_settings.json --send-email
 ```
 
 Полное описание находится в `CLI_COMMANDS.txt`. Для headless-сервера можно

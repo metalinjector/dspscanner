@@ -52,7 +52,7 @@ CLI не импортирует PySide6/Qt. Для сервера без GUI м�
 --------------------
 По умолчанию CLI загружает наиболее свежий файл:
 
-    DSPScanner_Config\search_settings.json
+    DSPScanner-Config\search_settings.json
 
 Эта папка находится рядом с программой. Если она недоступна для записи,
 программа может использовать резервную папку в профиле пользователя.
@@ -500,7 +500,7 @@ CLI не импортирует PySide6/Qt. Для сервера без GUI м�
 
 Аргументы:
 
-    "D:\DSPScanner\main.py" --cli --config "D:\DSPScanner\DSPScanner_Config\search_settings.json" --send-email --quiet
+    "D:\DSPScanner\main.py" --cli --config "D:\DSPScanner\DSPScanner-Config\search_settings.json" --send-email --quiet
 
 Рабочая папка:
 
