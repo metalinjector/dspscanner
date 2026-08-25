@@ -41,6 +41,10 @@ _DETAIL_CONTEXT_MULTIPLIER = 1.5
 _TOOLTIP_SCAN_CHARS_MIN = 8_000
 _TOOLTIP_SCAN_CHARS_MAX = 100_000
 _NONSPACE_RE = re.compile(r"\S+")
+# Пробельные символы, кроме перевода строки: подсказка сохраняет абзацы.
+_INLINE_SPACE_RE = re.compile(r"[^\S\n]+")
+_SPACE_AROUND_NEWLINE_RE = re.compile(r"[^\S\n]*\n[^\S\n]*")
+_BLANK_LINES_RE = re.compile(r"\n{2,}")
 
 
 @lru_cache(maxsize=1024)
@@ -190,6 +194,27 @@ def _find_aho_positions(
     return found
 
 
+def _normalize_block(text: str) -> str:
+    """Схлопывает пробелы, но сохраняет разбиение на абзацы.
+
+    Полная нормализация ``\\s+ -> " "`` склеивала абзацы: в подсказке текст,
+    разделённый в документе пустыми строками, выглядел одним потоком, и было
+    непонятно, что фрагменты взяты из разных мест страницы. Здесь переводы
+    строк переживают нормализацию: пробелы и табуляции внутри строки
+    схлопываются, одиночный перенос остаётся переносом, два и больше —
+    пустой строкой между абзацами (больше двух подряд смысла не несут).
+    """
+    # Разные варианты конца строки приводятся к \n, иначе \r\n даст лишний
+    # пустой абзац на каждом переносе.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Пробелы/табуляции внутри строки, но не сами переводы строк.
+    text = _INLINE_SPACE_RE.sub(" ", text)
+    # Пробелы вокруг переносов — иначе строки начинаются с отступа.
+    text = _SPACE_AROUND_NEWLINE_RE.sub("\n", text)
+    text = _BLANK_LINES_RE.sub("\n\n", text)
+    return text.strip()
+
+
 def _expanded_context_pair(
     text: str,
     start_pos: int,
@@ -235,7 +260,7 @@ def _expanded_context_pair(
             word_end = right_scan_end
         start = min(char_start, word_start)
         end = max(char_end, word_end)
-        snippet = _WHITESPACE_RE.sub(" ", text[start:end]).strip()
+        snippet = _normalize_block(text[start:end])
         return f"{'…' if start > 0 else ''}{snippet}{'…' if end < len(text) else ''}"
 
     return build(hover_words), build(detail_words)

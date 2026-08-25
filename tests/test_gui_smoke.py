@@ -1047,3 +1047,107 @@ def test_danger_zone_has_its_own_frame_style(qt_app):
 
     apply_modern_theme(qt_app)
     assert "QGroupBox#dangerZoneBox" in qt_app.styleSheet()
+
+
+def test_tooltip_html_renders_the_blank_line_between_paragraphs(qt_app):
+    """Пустая строка исходника доходит до подсказки как пустая строка.
+
+    Между движком и всплывающей подсказкой два места, где перенос мог
+    потеряться: экранирование HTML и стиль контейнера. Проверяем итоговую
+    разметку, а не только результат поиска.
+    """
+    from app.gui.results_model import result_tooltip_html
+
+    result = SearchResult(
+        "b.pdf",
+        "/x/b.pdf",
+        "беспилотники",
+        "…короткий контекст…",
+        "pdf",
+        "2026-01-01",
+        tooltip_context="Для служебного пользования, беспилотники.\n\nЛекарственные поражения печени.",
+    )
+
+    html = result_tooltip_html(result)
+
+    # Абзацы разделены двумя <br>, а не склеены в один поток.
+    assert "<br><br>Лекарственные" in html.replace("<br />", "<br>")
+    # Сырой перевод строки в разметку не попадает — иначе pre-wrap удвоит отступ.
+    assert "\n" not in html
+
+
+def test_checkbox_delegate_draws_exactly_one_indicator(qt_app):
+    """Делегат не должен рисовать чекбокс поверх нарисованного стилем.
+
+    QTableView сам рисует индикатор, когда модель отдаёт CheckStateRole:
+    вместе с индикатором делегата получались два наложенных чекбокса, и при
+    нажатии они расходились по состоянию — «двоение». Делегат обязан снять
+    флаг HasCheckIndicator перед тем, как отдать ячейку стилю.
+    """
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    from app.gui.results_model import CheckboxDelegate
+
+    delegate = CheckboxDelegate()
+    model = ResultsTableModel()
+    model.add_results([_result()])
+    index = model.index(0, 0)
+
+    # Модель действительно отдаёт состояние галочки, иначе тест бессмыслен.
+    option = QStyleOptionViewItem()
+    delegate.initStyleOption(option, index)
+    assert option.features & QStyleOptionViewItem.HasCheckIndicator
+
+    seen_features = []
+
+    class _Style:
+        def drawControl(self, element, opt, painter, widget=None):
+            seen_features.append(bool(opt.features & QStyleOptionViewItem.HasCheckIndicator))
+
+    class _Painter:
+        """Заглушка QPainter: считает вызовы, ничего не рисуя."""
+
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            def record(*args, **kwargs):
+                self.calls.append(name)
+
+            return record
+
+    class _Option(QStyleOptionViewItem):
+        """Подсовывает делегату наш _Style вместо системного."""
+
+        @property
+        def widget(self):
+            return None
+
+    painter = _Painter()
+    fake_option = QStyleOptionViewItem(option)
+    monkey_style = _Style()
+
+    import app.gui.results_model as rm
+
+    original = rm.QApplication.style
+    rm.QApplication.style = staticmethod(lambda: monkey_style)
+    try:
+        delegate.paint(painter, fake_option, index)
+    finally:
+        rm.QApplication.style = original
+
+    assert seen_features == [False], "стилю ушёл флаг индикатора — будет второй чекбокс"
+    # Свой индикатор делегат всё-таки нарисовал.
+    assert "drawRoundedRect" in painter.calls
+
+
+def test_checkbox_indicator_fits_inside_the_narrow_column(qt_app):
+    """Индикатор помещается в колонку ✓ целиком, а не наполовину.
+
+    Системный чекбокс прижимался к левому краю ячейки и обрезался: колонка
+    шириной 34 px уже, чем отступы стиля.
+    """
+    from app.gui.results_model import CheckboxDelegate
+
+    assert CheckboxDelegate._BOX_SIDE <= 34 - 4
+    # Строка таблицы имеет высоту 24 px — индикатор должен в неё влезать.
+    assert CheckboxDelegate._BOX_SIDE <= 24 - 4

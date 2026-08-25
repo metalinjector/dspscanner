@@ -133,8 +133,10 @@ QTabBar::tab:hover {{
 QGroupBox {{
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 10px;
-    margin-top: 18px;
-    padding: 18px 10px 10px 10px;
+    /* Полоса под заголовок; padding сверху не дублирует её, иначе
+       содержимое отрывается от подписи, к которой относится. */
+    margin-top: 14px;
+    padding: 6px 10px 10px 10px;
     background-color: {BG_CARD};
     font-weight: 600;
 }}
@@ -142,7 +144,7 @@ QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
     left: 12px;
-    top: -3px;
+    top: 1px;
     padding: 0 6px;
     color: {TEXT_MUTED};
 }}

@@ -14,13 +14,19 @@ from typing import Any, Iterable, List
 
 import re
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRect, QRectF, Qt
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
     QStyledItemDelegate,
-    QStyleOptionButton,
     QStyleOptionViewItem,
 )
 
@@ -63,33 +69,79 @@ class CheckboxDelegate(QStyledItemDelegate):
 
     Индикатор рисуется вручную: стандартный QTableView рисует его только у
     редактируемых ячеек. Клик внутри колонки переключает состояние через модель.
+
+    Рисование целиком своё, без QStyle. Причины две:
+
+    * ``CE_ItemViewItem`` сам рисует индикатор, если модель отдаёт
+      ``CheckStateRole`` (``initStyleOption`` выставляет ``HasCheckIndicator``).
+      Вместе с нашим он давал два наложенных чекбокса — «двоение» при клике,
+      когда индикатор стиля перерисовывался в нажатом состоянии.
+    * Индикатор системного стиля прижимался к левому краю ячейки и при узкой
+      колонке ✓ обрезался пополам.
+
+    Собственная отрисовка убирает обе проблемы и заодно приводит галочку в
+    таблице к тому же виду, что у обычных QCheckBox из темы.
     """
+
+    #: Сторона квадрата индикатора. Умещается в колонку ✓ и в строку 24 px.
+    _BOX_SIDE = 16
+    _RADIUS = 4.0
+
+    _BORDER = QColor("#7A8394")
+    _BORDER_HOVER = QColor("#9BA5B7")
+    _BG = QColor("#11151C")
+    _BG_HOVER = QColor("#171C24")
+    _ACCENT = QColor("#4C8DFF")
+    _ACCENT_HOVER = QColor("#6AA1FF")
+    _CHECK = QColor("#0A0C10")
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
+
+        # Фон, выделение и рамку строки рисует стиль, но без текста и без
+        # своего индикатора — иначе он наложится на нарисованный ниже.
         opt.text = ""
+        opt.features &= ~QStyleOptionViewItem.HasCheckIndicator
         style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
 
-        # QStyleOptionButton нельзя сконструировать из QStyleOptionViewItem:
-        # это разные ветви иерархии, и PySide6 отвергает такой вызов
-        # (TypeError с последующим падением отрисовки). Поля переносятся руками.
-        indicator_opt = QStyleOptionButton()
-        indicator_opt.palette = opt.palette
-        indicator_opt.fontMetrics = opt.fontMetrics
-        indicator_opt.state = QStyle.State_Enabled
-        indicator_opt.state |= (
-            QStyle.State_On if opt.checkState == Qt.Checked else QStyle.State_Off
-        )
-        indicator_opt.rect = opt.rect
-        rect = style.subElementRect(
-            QStyle.SE_CheckBoxIndicator, indicator_opt, widget
-        )
+        checked = index.data(Qt.CheckStateRole) == Qt.Checked
+        hovered = bool(opt.state & QStyle.State_MouseOver)
+
+        side = self._BOX_SIDE
+        rect = QRect(0, 0, side, side)
         rect.moveCenter(opt.rect.center())
-        indicator_opt.rect = rect
-        style.drawControl(QStyle.CE_CheckBox, indicator_opt, painter, widget)
+        # Полупиксельный сдвиг: рамка шириной 1 px ложится ровно на пиксель,
+        # иначе сглаживание размывает её в две полупрозрачные линии.
+        box = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        if checked:
+            fill = self._ACCENT_HOVER if hovered else self._ACCENT
+            border = fill
+        else:
+            fill = self._BG_HOVER if hovered else self._BG
+            border = self._BORDER_HOVER if hovered else self._BORDER
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(box, self._RADIUS, self._RADIUS)
+
+        if checked:
+            path = QPainterPath()
+            # Галочка в долях стороны — масштабируется вместе с _BOX_SIDE.
+            path.moveTo(box.left() + side * 0.24, box.top() + side * 0.52)
+            path.lineTo(box.left() + side * 0.43, box.top() + side * 0.71)
+            path.lineTo(box.left() + side * 0.77, box.top() + side * 0.30)
+            pen = QPen(self._CHECK, 2.0)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+        painter.restore()
 
     def editorEvent(self, event, model, option, index):
         from PySide6.QtCore import QEvent

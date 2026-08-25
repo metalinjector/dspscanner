@@ -945,8 +945,11 @@ class MainWindow(QMainWindow):
         """
         box = QGroupBox("Отмеченные файлы")
         outer = QVBoxLayout(box)
-        outer.setContentsMargins(14, 22, 14, 10)
-        outer.setSpacing(6)
+        # Сверху меньше, чем по бокам: заголовок группы лежит в собственной
+        # полосе margin-top, и полный отступ поверх неё отрывал кнопки от
+        # подписи, к которой они относятся.
+        outer.setContentsMargins(14, 10, 14, 12)
+        outer.setSpacing(8)
 
         select_row = QHBoxLayout()
         select_row.setSpacing(8)
@@ -1003,7 +1006,7 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Безопасные операции (необратимо)")
         box.setObjectName("dangerZoneBox")
         row = QHBoxLayout(box)
-        row.setContentsMargins(14, 22, 14, 10)
+        row.setContentsMargins(14, 10, 14, 12)
         row.setSpacing(8)
 
         self.secure_move_btn = QPushButton("Безопасно переместить отмеченные…")

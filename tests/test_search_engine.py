@@ -98,3 +98,40 @@ def test_context_contains_the_match():
     assert "СЕКРЕТ" in match.context
     assert "СЕКРЕТ" in match.tooltip_context
     assert len(match.detail_context) >= len(match.tooltip_context)
+
+
+def test_tooltip_context_keeps_paragraph_breaks():
+    """Пустая строка документа должна остаться пустой строкой в подсказке.
+
+    Полная нормализация пробелов склеивала абзацы: фрагменты из разных мест
+    страницы выглядели одним предложением. Колонка «Контекст» при этом
+    остаётся однострочной — там перенос сломал бы строку таблицы.
+    """
+    from app.scanning.search_engine import find_matches
+
+    text = (
+        "Для служебного пользования, беспилотники.\n\n\n"
+        "Лекарственные поражения печени является одной из наиболее частых причин."
+    )
+    match = find_matches(text, ["беспилотники"], context_chars=50)[0]
+
+    assert "беспилотники.\n\nЛекарственные" in match.tooltip_context
+    assert "\n\n" in match.detail_context
+    # Три и более переводов подряд сводятся к одной пустой строке.
+    assert "\n\n\n" not in match.tooltip_context
+    # Короткий контекст таблицы остаётся в одну строку.
+    assert "\n" not in match.context
+
+
+def test_tooltip_context_collapses_spaces_inside_a_line():
+    """Внутри абзаца лишние пробелы и переносы строк по-прежнему схлопываются."""
+    from app.scanning.search_engine import find_matches
+
+    text = "начало   строки\tсекрет   и\r\nпродолжение того же абзаца"
+    match = find_matches(text, ["секрет"], context_chars=80)[0]
+
+    assert "   " not in match.tooltip_context
+    assert "\t" not in match.tooltip_context
+    assert "\r" not in match.tooltip_context
+    # Одиночный перенос сохраняется как перенос, а не как пустая строка.
+    assert "и\nпродолжение" in match.tooltip_context
