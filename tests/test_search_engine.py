@@ -135,3 +135,139 @@ def test_tooltip_context_collapses_spaces_inside_a_line():
     assert "\r" not in match.tooltip_context
     # Одиночный перенос сохраняется как перенос, а не как пустая строка.
     assert "и\nпродолжение" in match.tooltip_context
+
+
+def test_context_window_matches_the_full_scan_implementation():
+    """Адаптивное окно обязано давать ровно тот же контекст, что и полный разбор.
+
+    Раньше для каждого совпадения токенизировалось фиксированное окно в
+    _TOOLTIP_SCAN_CHARS_MIN символов с каждой стороны. Теперь окно растёт по
+    необходимости — результат должен совпадать посимвольно, иначе экономия
+    куплена ценой другого текста в подсказке.
+    """
+    import random
+    import re
+
+    from app.scanning import search_engine as se
+
+    def reference(text, start_pos, end_pos, context_chars):
+        """Прежняя реализация: разбирает окно целиком."""
+        hover = max(se._MIN_TOOLTIP_WORDS_EACH_SIDE, int(context_chars))
+        detail = max(hover + 1, int(round(hover * se._DETAIL_CONTEXT_MULTIPLIER)))
+        containing_start = start_pos
+        while containing_start > 0 and not text[containing_start - 1].isspace():
+            containing_start -= 1
+        containing_end = end_pos
+        while containing_end < len(text) and not text[containing_end].isspace():
+            containing_end += 1
+        scan = min(
+            se._TOOLTIP_SCAN_CHARS_MAX,
+            max(se._TOOLTIP_SCAN_CHARS_MIN, detail * 80),
+        )
+        left_start = max(0, containing_start - scan)
+        right_end = min(len(text), containing_end + scan)
+        left = list(re.finditer(r"\S+", text[left_start:containing_start]))
+        right = list(re.finditer(r"\S+", text[containing_end:right_end]))
+        char_start = max(0, start_pos - context_chars)
+        char_end = min(len(text), end_pos + context_chars)
+
+        def build(count):
+            word_start = (
+                left_start + left[-count].start() if len(left) >= count else left_start
+            )
+            word_end = (
+                containing_end + right[count - 1].end()
+                if len(right) >= count
+                else right_end
+            )
+            start = min(char_start, word_start)
+            end = max(char_end, word_end)
+            snippet = se._normalize_block(text[start:end])
+            head = "…" if start > 0 else ""
+            tail = "…" if end < len(text) else ""
+            return f"{head}{snippet}{tail}"
+
+        return build(hover), build(detail)
+
+    random.seed(20260825)
+    words = ["слово", "договор", "текст", "№42", "оченьдлинноеслово" * 3]
+    separators = [" ", "  ", "\n", "\n\n", "\t", "\r\n"]
+
+    for _ in range(150):
+        text = "".join(
+            random.choice(words) + random.choice(separators)
+            for _ in range(random.choice([5, 40, 300]))
+        )
+        start = random.randrange(0, max(1, len(text) - 1))
+        end = min(len(text), start + random.randrange(1, 10))
+        context_chars = random.choice([0, 40, 150, 400])
+        assert se._expanded_context_pair(text, start, end, context_chars) == reference(
+            text, start, end, context_chars
+        )
+
+
+def test_context_window_handles_text_without_spaces():
+    """Текст без пробелов не должен зацикливать расширение окна.
+
+    Окно растёт, пока не наберётся нужное число слов; в base64-подобном
+    документе слов нет вовсе, и выходом служит только жёсткая граница.
+    """
+    from app.scanning.search_engine import _expanded_context_pair
+
+    blob = "A" * 40_000
+    hover, detail = _expanded_context_pair(blob, 20_000, 20_005, 40)
+
+    assert hover and detail
+    assert len(detail) >= len(hover)
+
+
+def test_expanded_context_does_not_tokenize_the_whole_window():
+    """Контекст разбирает столько текста, сколько нужно, а не фиксированное окно.
+
+    Это и делало сканирование медленным: на каждое совпадение токенизировалось
+    по _TOOLTIP_SCAN_CHARS_MIN символов с каждой стороны (8000 + 8000), хотя
+    для 60 слов хватает нескольких сотен. Проверка считает реально
+    просканированные символы, а не время: результат не зависит от нагрузки
+    машины и одинаков в CI.
+    """
+    from app.scanning import search_engine as se
+
+    scanned = []
+    original = se._NONSPACE_RE.finditer
+
+    def counting_finditer(text, *args):
+        if args:
+            start, end = args[0], args[1]
+        else:
+            start, end = 0, len(text)
+        scanned.append(end - start)
+        return original(text, *args)
+
+    class _Proxy:
+        """Подменяет только finditer, остальное делегирует настоящему шаблону."""
+
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def finditer(self, text, *args):
+            return counting_finditer(text, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._pattern, name)
+
+    real = se._NONSPACE_RE
+    se._NONSPACE_RE = _Proxy(real)
+    try:
+        text = "договор поставка отчёт комплектующие анализ страница пункт " * 2_000
+        middle = len(text) // 2
+        se._expanded_context_pair(text, middle, middle + 7, 40)
+    finally:
+        se._NONSPACE_RE = real
+
+    total = sum(scanned)
+    # Прежняя реализация разбирала бы 2 * _TOOLTIP_SCAN_CHARS_MIN символов.
+    old_cost = 2 * se._TOOLTIP_SCAN_CHARS_MIN
+    assert total < old_cost / 4, (
+        f"разобрано {total} символов при старой стоимости {old_cost} — "
+        "окно контекста снова читает лишнее"
+    )

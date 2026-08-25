@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Set
 
 APP_NAME = "DSP Scanner"
-APP_VERSION = "4.3.0.0"
+APP_VERSION = "4.4.0.0"
 
 
 def _default_log_dir() -> Path:

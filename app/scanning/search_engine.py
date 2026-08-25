@@ -41,12 +41,17 @@ _DETAIL_CONTEXT_MULTIPLIER = 1.5
 _TOOLTIP_SCAN_CHARS_MIN = 8_000
 _TOOLTIP_SCAN_CHARS_MAX = 100_000
 _NONSPACE_RE = re.compile(r"\S+")
+# Стартовая оценка «символов на слово» для окна разбора контекста. Занижена
+# намеренно: окно удваивается, пока слов не хватает, поэтому ошибка оценки
+# стоит одного лишнего прохода, а не разбора всего документа.
+_CHARS_PER_TOKEN_ESTIMATE = 12
+# Запас к оценке по плотности: лучше один раз взять чуть больше, чем
+# перечитывать окно ещё раз.
+_WINDOW_SAFETY = 1.3
 # Пробельные символы, кроме перевода строки: подсказка сохраняет абзацы.
 _INLINE_SPACE_RE = re.compile(r"[^\S\n]+")
 _SPACE_AROUND_NEWLINE_RE = re.compile(r"[^\S\n]*\n[^\S\n]*")
 _BLANK_LINES_RE = re.compile(r"\n{2,}")
-
-
 @lru_cache(maxsize=1024)
 def _build_pattern(word: str, case_sensitive: bool, whole_word: bool) -> re.Pattern:
     term = re.sub(r"\*+", "*", word.strip())
@@ -204,15 +209,71 @@ def _normalize_block(text: str) -> str:
     схлопываются, одиночный перенос остаётся переносом, два и больше —
     пустой строкой между абзацами (больше двух подряд смысла не несут).
     """
-    # Разные варианты конца строки приводятся к \n, иначе \r\n даст лишний
-    # пустой абзац на каждом переносе.
+    # Быстрый путь: если переносов строк нет вовсе, вся нормализация
+    # сводится к схлопыванию пробелов одним проходом.
+    if "\n" not in text and "\r" not in text:
+        return _INLINE_SPACE_RE.sub(" ", text).strip()
+
+    # Иначе — прежняя цепочка подстановок. Вариант с одним re.sub() и
+    # Python-колбэком был проверен и оказался вдвое медленнее: вызов функции
+    # на каждый участок пробелов дороже нескольких проходов на уровне C.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Пробелы/табуляции внутри строки, но не сами переводы строк.
     text = _INLINE_SPACE_RE.sub(" ", text)
-    # Пробелы вокруг переносов — иначе строки начинаются с отступа.
     text = _SPACE_AROUND_NEWLINE_RE.sub("\n", text)
     text = _BLANK_LINES_RE.sub("\n\n", text)
     return text.strip()
+
+
+def _grow_window(window: int, found: int, needed: int) -> int:
+    """Следующий размер окна разбора контекста.
+
+    Простое удвоение плохо ведёт себя на редких пробелах (длинные «слова»
+    вроде base64): чтобы набрать 60 токенов, пришлось бы удваиваться много
+    раз, каждый раз перечитывая уже разобранное. Здесь по фактической
+    плотности токенов оценивается нужный размер сразу, но не меньше
+    удвоения — чтобы гарантированно сходиться и на тексте без пробелов.
+    """
+    if found > 0:
+        estimated = int(window * (needed + 1) / found * _WINDOW_SAFETY)
+        return max(window * 2, estimated)
+    return window * 2
+
+
+def _tokens_left(text: str, end: int, hard_start: int, needed: int) -> tuple[list, int]:
+    """Токены слева от ``end``, окно расширяется только по необходимости.
+
+    Раньше здесь всегда разбирался фиксированный кусок в ``_TOOLTIP_SCAN_CHARS_MIN``
+    символов с каждой стороны — на файл с сотнями совпадений это давало
+    миллионы лишних символов токенизации, хотя реально нужны несколько
+    десятков слов. Окно растёт вдвое, пока не наберётся ``needed + 1``
+    токенов либо не будет достигнута прежняя граница ``hard_start``.
+
+    Лишний токен нужен для полного совпадения со старым поведением: у самого
+    левого токена окна слово может быть срезано границей, и брать его как
+    результат нельзя, пока окно ещё можно расширить.
+    """
+    if end <= hard_start:
+        return [], hard_start
+    window = min(max(needed, 1) * _CHARS_PER_TOKEN_ESTIMATE, end - hard_start)
+    while True:
+        start = max(hard_start, end - window)
+        tokens = list(_NONSPACE_RE.finditer(text, start, end))
+        if len(tokens) > needed or start == hard_start:
+            return tokens, start
+        window = _grow_window(window, len(tokens), needed)
+
+
+def _tokens_right(text: str, start: int, hard_end: int, needed: int) -> tuple[list, int]:
+    """Симметричная версия для правой стороны совпадения."""
+    if start >= hard_end:
+        return [], hard_end
+    window = min(max(needed, 1) * _CHARS_PER_TOKEN_ESTIMATE, hard_end - start)
+    while True:
+        end = min(hard_end, start + window)
+        tokens = list(_NONSPACE_RE.finditer(text, start, end))
+        if len(tokens) > needed or end == hard_end:
+            return tokens, end
+        window = _grow_window(window, len(tokens), needed)
 
 
 def _expanded_context_pair(
@@ -241,21 +302,28 @@ def _expanded_context_pair(
         _TOOLTIP_SCAN_CHARS_MAX,
         max(_TOOLTIP_SCAN_CHARS_MIN, detail_words * 80),
     )
-    left_scan_start = max(0, containing_start - scan_chars)
-    right_scan_end = min(len(text), containing_end + scan_chars)
-    left_tokens = list(_NONSPACE_RE.finditer(text[left_scan_start:containing_start]))
-    right_tokens = list(_NONSPACE_RE.finditer(text[containing_end:right_scan_end]))
+    # Границы, дальше которых разбор не уходил и раньше: результат обязан
+    # совпадать со старым при любом размере промежуточного окна.
+    hard_left = max(0, containing_start - scan_chars)
+    hard_right = min(len(text), containing_end + scan_chars)
+    # Достаточно набрать слова для широкого варианта: узкий берёт их подмножество.
+    left_tokens, left_scan_start = _tokens_left(
+        text, containing_start, hard_left, detail_words
+    )
+    right_tokens, right_scan_end = _tokens_right(
+        text, containing_end, hard_right, detail_words
+    )
 
     char_start = max(0, start_pos - context_chars)
     char_end = min(len(text), end_pos + context_chars)
 
     def build(words_each_side: int) -> str:
         if len(left_tokens) >= words_each_side:
-            word_start = left_scan_start + left_tokens[-words_each_side].start()
+            word_start = left_tokens[-words_each_side].start()
         else:
             word_start = left_scan_start
         if len(right_tokens) >= words_each_side:
-            word_end = containing_end + right_tokens[words_each_side - 1].end()
+            word_end = right_tokens[words_each_side - 1].end()
         else:
             word_end = right_scan_end
         start = min(char_start, word_start)

@@ -556,7 +556,9 @@ class MainWindow(QMainWindow):
         terms_row.setSpacing(8)
 
         content_terms_box = QVBoxLayout()
-        content_terms_box.setSpacing(4)
+        # Заголовок с круглой кнопкой «?» выше обычной подписи, поэтому при
+        # spacing 4 кнопка почти прилипала к кружку.
+        content_terms_box.setSpacing(8)
         content_terms_box.addWidget(
             self._section_header(
                 "Внутри файлов",
@@ -573,7 +575,7 @@ class MainWindow(QMainWindow):
         terms_row.addLayout(content_terms_box, 1)
 
         filename_terms_box = QVBoxLayout()
-        filename_terms_box.setSpacing(4)
+        filename_terms_box.setSpacing(8)
         filename_terms_box.addWidget(
             self._section_header(
                 "В названиях файлов",
