@@ -45,20 +45,44 @@ def configure_ocr_limit(limit: int) -> None:
         os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 
-def _tesseract_environment(tesseract_bin: str) -> dict[str, str]:
+# Градация моделей OCR: имя каталога с traineddata.
+# fast — int8-модели (самые быстрые, точность чуть ниже);
+# medium — стандартные float-модели (баланс);
+# best — float32-модели максимальной точности (самые медленные).
+OCR_MODEL_TIERS: dict[str, str] = {
+    "fast": "tessdata-fast",
+    "medium": "tessdata-medium",
+    "best": "tessdata-best",
+}
+_DEFAULT_OCR_TIER = "fast"
+
+
+def _ocr_tessdata_dir(tesseract_bin: str, tier: str) -> Path:
+    """Каталог traineddata для выбранной градации моделей.
+
+    Ищет ``tessdata-<tier>`` рядом с исполняемым файлом Tesseract; при
+    отсутствии — ``tessdata``. Позволяет переключать fast/medium/best без
+    переустановки Tesseract, достаточно положить каталоги рядом с exe.
+    """
+    executable = Path(tesseract_bin).resolve()
+    tier_dir_name = OCR_MODEL_TIERS.get(tier, OCR_MODEL_TIERS[_DEFAULT_OCR_TIER])
+    for base in (executable.parent, executable.parent.parent):
+        tier_dir = base / tier_dir_name
+        if (tier_dir / "rus.traineddata").is_file():
+            return tier_dir
+    # Fallback: единый каталог tessdata (как раньше)
+    for base in (executable.parent, executable.parent.parent):
+        fallback = base / "tessdata"
+        if fallback.is_dir():
+            return fallback
+    return executable.parent / "tessdata"
+
+
+def _tesseract_environment(tesseract_bin: str, tier: str = _DEFAULT_OCR_TIER) -> dict[str, str]:
     """Формирует окружение для системной и переносимой копии Tesseract."""
     env = os.environ.copy()
-    executable = Path(tesseract_bin).resolve()
-    candidates = (
-        executable.parent / "tessdata",
-        executable.parent.parent / "tessdata",
-    )
-    for candidate in candidates:
-        if candidate.is_dir():
-            # Tesseract 5 принимает путь к каталогу tessdata. Не переопределяем
-            # явную пользовательскую настройку окружения.
-            env.setdefault("TESSDATA_PREFIX", str(candidate))
-            break
+    # TESSDATA_PREFIX указывает на каталог выбранной градации моделей.
+    env["TESSDATA_PREFIX"] = str(_ocr_tessdata_dir(tesseract_bin, tier))
     return env
 
 
@@ -68,6 +92,7 @@ def _run_tesseract(
     *,
     input_bytes: bytes | None = None,
     timeout: int,
+    tier: str = _DEFAULT_OCR_TIER,
 ) -> subprocess.CompletedProcess[bytes]:
     """Безопасно запускает Tesseract напрямую, без pytesseract/Pillow."""
     kwargs: dict = {
@@ -76,17 +101,21 @@ def _run_tesseract(
         "stderr": subprocess.PIPE,
         "timeout": timeout,
         "check": False,
-        "env": _tesseract_environment(tesseract_bin),
+        "env": _tesseract_environment(tesseract_bin, tier),
     }
     if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     return subprocess.run([tesseract_bin, *arguments], **kwargs)
 
 
-def _resolve_ocr_lang(tesseract_bin: str, russian_only: bool = True) -> Optional[str]:
+def _resolve_ocr_lang(
+    tesseract_bin: str,
+    russian_only: bool = True,
+    tier: str = _DEFAULT_OCR_TIER,
+) -> Optional[str]:
     """Определяет доступные языки OCR с учётом пользовательской настройки."""
     global _ocr_lang_resolved, _ocr_lang_done, _ocr_lang_command
-    command = str(Path(tesseract_bin)) + (":rus" if russian_only else ":full")
+    command = str(Path(tesseract_bin)) + (":rus" if russian_only else ":full") + f":{tier}"
     with _ocr_lang_lock:
         if _ocr_lang_done and _ocr_lang_command == command:
             return _ocr_lang_resolved
@@ -98,6 +127,7 @@ def _resolve_ocr_lang(tesseract_bin: str, russian_only: bool = True) -> Optional
                 Path(tesseract_bin),
                 ["--list-langs"],
                 timeout=15,
+                tier=tier,
             )
             output = completed.stdout.decode("utf-8", errors="replace")
             available = {
@@ -248,7 +278,10 @@ class PdfReader(BaseReader):
         # Tesseract запускается напрямую через CLI. Поэтому переносимой папки
         # Tesseract-OCR достаточно: отдельные Python-пакеты pytesseract и Pillow
         # больше не являются обязательными и не могут блокировать OCR.
-        language = _resolve_ocr_lang(tesseract_bin, russian_only=settings.russian_only)
+        tier = getattr(settings, "ocr_model_tier", _DEFAULT_OCR_TIER) or _DEFAULT_OCR_TIER
+        language = _resolve_ocr_lang(
+            tesseract_bin, russian_only=settings.russian_only, tier=tier,
+        )
         page_timeout = max(5, min(settings.per_file_timeout, 120))
 
         def ocr_png(png_bytes: bytes) -> str:
@@ -266,6 +299,7 @@ class PdfReader(BaseReader):
                             ["stdin", "stdout", "-l", lang, "--psm", "3"],
                             input_bytes=png_bytes,
                             timeout=page_timeout,
+                            tier=tier,
                         )
                     except subprocess.TimeoutExpired:
                         errors.append(f"{lang}: превышен таймаут {page_timeout} с")

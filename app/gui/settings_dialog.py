@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
-    QMessageBox, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox,
+    QVBoxLayout, QMessageBox, QWidget,
 )
 
 from app.config import MAX_WORKERS_LIMIT
@@ -120,6 +120,24 @@ class SettingsDialog(QDialog):
             "Выключите, если в документах много английского текста."
         )
         ext_layout.addRow(self.russian_only)
+
+        # Выбор градации моделей OCR
+        self.ocr_model_tier = QComboBox()
+        self.ocr_model_tier.addItem("Быстрая (int8, +30% скорость)", "fast")
+        self.ocr_model_tier.addItem("Средняя (баланс скорость/точность)", "medium")
+        self.ocr_model_tier.addItem("Максимальная точность (медленно)", "best")
+        tier_index = {"fast": 0, "medium": 1, "best": 2}.get(
+            getattr(s, "ocr_model_tier", "fast"), 0
+        )
+        self.ocr_model_tier.setCurrentIndex(tier_index)
+        self.ocr_model_tier.setToolTip(
+            "Градация моделей Tesseract (каталоги tessdata-fast/medium/best\n"
+            "рядом с tesseract.exe):\n"
+            "• Быстрая — int8-модели: +30% скорости, точность чуть ниже;\n"
+            "• Средняя — стандартные модели: баланс;\n"
+            "• Максимальная — самые точные модели, работают медленнее."
+        )
+        ext_layout.addRow("Модель OCR:", self.ocr_model_tier)
 
         # Кнопка "Определить всё"
         detect_all_btn = QPushButton("Определить автоматически")
@@ -284,6 +302,7 @@ class SettingsDialog(QDialog):
         settings.secure_passes = self.secure_passes.value()
         settings.reset_stats_on_start = self.reset_stats_on_start.isChecked()
         settings.russian_only = self.russian_only.isChecked()
+        settings.ocr_model_tier = self.ocr_model_tier.currentData() or "fast"
         if not save_settings(settings):
             QMessageBox.critical(self, "Ошибка", "Не удалось сохранить настройки на диск.")
             return

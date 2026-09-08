@@ -59,6 +59,7 @@ class AppSettings:
     secure_passes: int = 3
     reset_stats_on_start: bool = True
     russian_only: bool = True  # Искать только русский текст (быстрее, чем rus+eng)
+    ocr_model_tier: str = "fast"  # Градация моделей OCR: fast / medium / best
 
     def sanitized(self) -> "AppSettings":
         def _int(value, default: int, low: int, high: int) -> int:
@@ -77,6 +78,10 @@ class AppSettings:
                 return None
             return text or None
 
+        def _tier(value) -> str:
+            text = str(value or "fast").strip().lower()
+            return text if text in ("fast", "medium", "best") else "fast"
+
         return AppSettings(
             libreoffice_path=_path(self.libreoffice_path),
             tesseract_path=_path(self.tesseract_path),
@@ -86,6 +91,7 @@ class AppSettings:
             secure_passes=_int(self.secure_passes, 3, 1, 7),
             reset_stats_on_start=bool(self.reset_stats_on_start),
             russian_only=bool(self.russian_only),
+            ocr_model_tier=_tier(self.ocr_model_tier),
         )
 
     def to_mapping(self) -> dict:
@@ -109,6 +115,7 @@ def _apply_environment_overrides(settings: AppSettings) -> AppSettings:
         "DSP_SCANNER_MAX_MATCHES": "max_matches_per_word",
         "DSP_SCANNER_SECURE_PASSES": "secure_passes",
         "DSP_SCANNER_RUSSIAN_ONLY": "russian_only",
+        "DSP_SCANNER_OCR_MODEL_TIER": "ocr_model_tier",
     }
     values = asdict(settings)
     for env_name, field_name in mapping.items():
