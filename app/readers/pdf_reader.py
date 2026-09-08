@@ -83,9 +83,10 @@ def _run_tesseract(
     return subprocess.run([tesseract_bin, *arguments], **kwargs)
 
 
-def _resolve_ocr_lang(tesseract_bin: str) -> Optional[str]:
+def _resolve_ocr_lang(tesseract_bin: str, russian_only: bool = True) -> Optional[str]:
+    """Определяет доступные языки OCR с учётом пользовательской настройки."""
     global _ocr_lang_resolved, _ocr_lang_done, _ocr_lang_command
-    command = str(Path(tesseract_bin))
+    command = str(Path(tesseract_bin)) + (":rus" if russian_only else ":full")
     with _ocr_lang_lock:
         if _ocr_lang_done and _ocr_lang_command == command:
             return _ocr_lang_resolved
@@ -94,7 +95,7 @@ def _resolve_ocr_lang(tesseract_bin: str) -> Optional[str]:
         _ocr_lang_command = command
         try:
             completed = _run_tesseract(
-                command,
+                Path(tesseract_bin),
                 ["--list-langs"],
                 timeout=15,
             )
@@ -104,16 +105,20 @@ def _resolve_ocr_lang(tesseract_bin: str) -> Optional[str]:
                 for line in output.splitlines()
                 if line.strip() and not line.lower().startswith("list of available languages")
             }
-            if {"rus", "eng"}.issubset(available):
+            # Если включён режим "только русский" - используем rus, иначе rus+eng
+            if russian_only and "rus" in available:
+                _ocr_lang_resolved = "rus"
+            elif {"rus", "eng"}.issubset(available):
                 _ocr_lang_resolved = "rus+eng"
             elif "rus" in available:
                 _ocr_lang_resolved = "rus"
             elif "eng" in available:
                 _ocr_lang_resolved = "eng"
             logger.info(
-                "Tesseract: определён язык OCR: %s (доступно: %s)",
+                "Tesseract: определён язык OCR: %s (доступно: %s, russian_only=%s)",
                 _ocr_lang_resolved,
                 ", ".join(sorted(available)) or "ничего",
+                russian_only,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.debug("Не удалось получить список языков Tesseract: %s", exc)
@@ -243,12 +248,16 @@ class PdfReader(BaseReader):
         # Tesseract запускается напрямую через CLI. Поэтому переносимой папки
         # Tesseract-OCR достаточно: отдельные Python-пакеты pytesseract и Pillow
         # больше не являются обязательными и не могут блокировать OCR.
-        language = _resolve_ocr_lang(tesseract_bin)
+        language = _resolve_ocr_lang(tesseract_bin, russian_only=settings.russian_only)
         page_timeout = max(5, min(settings.per_file_timeout, 120))
 
         def ocr_png(png_bytes: bytes) -> str:
             with _OCR_SEMAPHORE:
-                cascade = (language,) if language else ("rus+eng", "rus", "eng")
+                # Каскад зависит от режима russian_only: rus или rus+eng
+                if language == "rus":
+                    cascade = ("rus",)
+                else:
+                    cascade = (language,) if language else ("rus+eng", "rus", "eng")
                 errors: list[str] = []
                 for lang in cascade:
                     try:
@@ -277,52 +286,65 @@ class PdfReader(BaseReader):
         failures: list[str] = []
         workers = min(_OCR_CHUNK, _OCR_LIMIT, max(1, len(page_indices)))
 
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsp-ocr") as pool:
+        # Двухпроходный адаптивный OCR:
+        # Пасс 1: все страницы на 150 DPI (быстро)
+        # Пасс 2: страницы с малым текстом на 250 DPI (точно)
+        # Экономия: хорошие сканы не тратят время на 250 DPI.
+        # Текст пасса 1 сохраняется и НЕ перезаписывается, если пасс 2 не лучше.
+        def ocr_page(page_index: int, target_dpi: int) -> str:
+            try:
+                page = document[page_index]
+                actual_dpi = min(target_dpi, _safe_ocr_dpi(page))
+                pixmap = page.get_pixmap(dpi=actual_dpi, alpha=False)
+                png_bytes = pixmap.tobytes("png")
+                return ocr_png(png_bytes)
+            except Exception as exc:
+                logger.debug(
+                    "Сбой OCR на странице %d файла %s (DPI=%d): %s",
+                    page_index + 1, doc_name, target_dpi, exc,
+                )
+                return ""
+
+        # Пасс 1: 150 DPI для всех страниц
+        pass1_texts: dict[int, str] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsp-ocr-p1") as pool:
             for chunk_start in range(0, len(page_indices), _OCR_CHUNK):
                 chunk = page_indices[chunk_start:chunk_start + _OCR_CHUNK]
-                futures = {}
-                for page_index in chunk:
-                    try:
-                        page = document[page_index]
-                        dpi = _safe_ocr_dpi(page)
-                        if dpi < _OCR_TARGET_DPI:
-                            logger.debug(
-                                "OCR страницы %d файла %s: DPI снижен с %d до %d для ограничения памяти",
-                                page_index + 1,
-                                doc_name,
-                                _OCR_TARGET_DPI,
-                                dpi,
-                            )
-                        pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-                        png_bytes = pixmap.tobytes("png")
-                        # Запускаем OCR сразу после рендеринга каждой страницы.
-                        # Пока PyMuPDF готовит следующую страницу, Tesseract уже
-                        # обрабатывает предыдущую. Размер чанка (не более 4)
-                        # по-прежнему жёстко ограничивает число PNG в памяти.
-                        futures[pool.submit(ocr_png, png_bytes)] = page_index
-                    except Exception as exc:
-                        failures.append(f"стр. {page_index + 1}: рендеринг: {exc}")
-                        logger.debug(
-                            "Сбой рендеринга страницы %d файла %s: %s",
-                            page_index + 1,
-                            doc_name,
-                            exc,
-                        )
-
+                futures = {pool.submit(ocr_page, idx, 150): idx for idx in chunk}
                 for future in as_completed(futures):
                     page_index = futures[future]
                     try:
-                        page_text = future.result()
-                        if page_text.strip():
-                            page_texts[page_index] = page_text
+                        text = future.result()
+                        if text.strip():
+                            pass1_texts[page_index] = text
                     except Exception as exc:
-                        failures.append(f"стр. {page_index + 1}: {exc}")
-                        logger.debug(
-                            "Сбой OCR на странице %d файла %s: %s",
-                            page_index + 1,
-                            doc_name,
-                            exc,
-                        )
+                        failures.append(f"стр. {page_index + 1} (пасс 1): {exc}")
+
+        # Пасс 2: 250 DPI только для страниц с малым текстом на 150 DPI
+        retry_pages = [
+            idx for idx in page_indices
+            if len(pass1_texts.get(idx, "").strip()) < 30
+        ]
+        if retry_pages:
+            logger.debug(
+                "OCR файла %s: пасс 2 (250 DPI) для %d из %d страниц",
+                doc_name, len(retry_pages), len(page_indices),
+            )
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsp-ocr-p2") as pool:
+                for chunk_start in range(0, len(retry_pages), _OCR_CHUNK):
+                    chunk = retry_pages[chunk_start:chunk_start + _OCR_CHUNK]
+                    futures = {pool.submit(ocr_page, idx, 250): idx for idx in chunk}
+                    for future in as_completed(futures):
+                        page_index = futures[future]
+                        try:
+                            text = future.result()
+                            # Используем пасс 2 только если он дал больше текста
+                            if len(text.strip()) > len(pass1_texts.get(page_index, "").strip()):
+                                pass1_texts[page_index] = text
+                        except Exception as exc:
+                            failures.append(f"стр. {page_index + 1} (пасс 2): {exc}")
+
+        page_texts = pass1_texts
 
         warning = None
         if failures:

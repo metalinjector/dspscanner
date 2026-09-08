@@ -109,6 +109,18 @@ class SettingsDialog(QDialog):
         ext_layout.addRow("Tesseract OCR:", ts_row)
         ext_layout.addRow(QLabel("Используется для распознавания сканированных PDF"))
 
+        # Чекбокс: Только русский текст
+        self.russian_only = QCheckBox(
+            "Искать только русский текст (быстрее, без английского)"
+        )
+        self.russian_only.setChecked(s.russian_only)
+        self.russian_only.setToolTip(
+            "Если включено, для OCR используется модель rus (int8 fast).\n"
+            "Это ускоряет обработку на 20-30% и снижает потребление памяти.\n"
+            "Выключите, если в документах много английского текста."
+        )
+        ext_layout.addRow(self.russian_only)
+
         # Кнопка "Определить всё"
         detect_all_btn = QPushButton("Определить автоматически")
         detect_all_btn.setObjectName("detectAllProgramsButton")
@@ -271,6 +283,7 @@ class SettingsDialog(QDialog):
         settings.max_matches_per_word = self.max_matches.value()
         settings.secure_passes = self.secure_passes.value()
         settings.reset_stats_on_start = self.reset_stats_on_start.isChecked()
+        settings.russian_only = self.russian_only.isChecked()
         if not save_settings(settings):
             QMessageBox.critical(self, "Ошибка", "Не удалось сохранить настройки на диск.")
             return

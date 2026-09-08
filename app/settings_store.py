@@ -58,6 +58,7 @@ class AppSettings:
     max_matches_per_word: int = 50
     secure_passes: int = 3
     reset_stats_on_start: bool = True
+    russian_only: bool = True  # Искать только русский текст (быстрее, чем rus+eng)
 
     def sanitized(self) -> "AppSettings":
         def _int(value, default: int, low: int, high: int) -> int:
@@ -84,6 +85,7 @@ class AppSettings:
             max_matches_per_word=_int(self.max_matches_per_word, 50, 1, 500),
             secure_passes=_int(self.secure_passes, 3, 1, 7),
             reset_stats_on_start=bool(self.reset_stats_on_start),
+            russian_only=bool(self.russian_only),
         )
 
     def to_mapping(self) -> dict:
@@ -106,6 +108,7 @@ def _apply_environment_overrides(settings: AppSettings) -> AppSettings:
         "DSP_SCANNER_PER_FILE_TIMEOUT": "per_file_timeout",
         "DSP_SCANNER_MAX_MATCHES": "max_matches_per_word",
         "DSP_SCANNER_SECURE_PASSES": "secure_passes",
+        "DSP_SCANNER_RUSSIAN_ONLY": "russian_only",
     }
     values = asdict(settings)
     for env_name, field_name in mapping.items():
