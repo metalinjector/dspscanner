@@ -1436,3 +1436,26 @@ def test_plain_help_text_is_not_forced_into_rich_text(window):
         assert dialog.textFormat() == Qt.TextFormat.AutoText
     finally:
         dialog.deleteLater()
+
+
+def test_ocr_settings_roundtrip(qt_app, monkeypatch):
+    from app.gui import settings_dialog
+    from app.settings_store import AppSettings
+    monkeypatch.setattr(settings_dialog, 'load_settings', lambda: AppSettings())
+    captured = []
+    monkeypatch.setattr(settings_dialog, 'save_settings', lambda value: captured.append(value) or True)
+    dialog = settings_dialog.SettingsDialog()
+    dialog.ocr_quality.setCurrentIndex(1)
+    dialog.ocr_model_tier.setCurrentIndex(2)
+    dialog.russian_only.setChecked(False)
+    dialog.ocr_force.setChecked(True)
+    dialog.ocr_workers.setValue(4)
+    dialog.ocr_page_timeout.setValue(90)
+    dialog.pdf_timeout.setValue(3600)
+    dialog._accept()
+    assert captured[0].ocr_quality == 'thorough'
+    assert captured[0].ocr_model_tier == 'best'
+    assert captured[0].russian_only is False and captured[0].ocr_force is True
+    assert captured[0].ocr_workers == 4 and captured[0].ocr_page_timeout == 90
+    assert captured[0].pdf_timeout == 3600
+    dialog.close()

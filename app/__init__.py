@@ -10,4 +10,6 @@
     app.gui          — графический интерфейс на PySide6
 """
 
-__version__ = "2.9.9"
+from app.config import APP_VERSION as __version__
+
+__all__ = ["__version__"]

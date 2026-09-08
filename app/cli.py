@@ -100,8 +100,15 @@ def _parser() -> argparse.ArgumentParser:
             "немедленно, но общее число уточняется по ходу"
         ),
     )
+    reading.add_argument("--ocr-model-tier", choices=("fast", "medium", "best"), help="набор моделей OCR")
+    reading.add_argument("--ocr-quality", choices=("adaptive", "thorough"), help="адаптивный или тщательный OCR")
+    reading.add_argument("--russian-only", action=argparse.BooleanOptionalAction, default=None, help="rus вместо rus+eng")
+    reading.add_argument("--ocr-force", action=argparse.BooleanOptionalAction, default=None, help="OCR всех страниц PDF")
+    reading.add_argument("--ocr-workers", type=int, help="общий лимит процессов OCR: 0 (авто) — 32")
+    reading.add_argument("--ocr-page-timeout", type=int, help="таймаут одного прохода OCR: 5–600 секунд")
+    reading.add_argument("--pdf-timeout", type=int, help="общий предел для PDF: 30–86400 секунд")
     reading.add_argument("--workers", type=int, help="число параллельных потоков")
-    reading.add_argument("--timeout", type=int, help="таймаут чтения одного файла, секунд")
+    reading.add_argument("--timeout", type=int, help="таймаут файла; для PDF — базовый предел простоя, секунд")
     reading.add_argument("--libreoffice", metavar="FILE", help="путь к soffice/LibreOffice для этого запуска")
     reading.add_argument("--tesseract", metavar="FILE", help="путь к tesseract для этого запуска")
 
@@ -290,6 +297,11 @@ def _apply_runtime_application_settings(args: argparse.Namespace, config: Mappin
     if args.max_matches is not None and not 1 <= args.max_matches <= 500:
         raise ValueError("--max-matches должен быть от 1 до 500")
 
+    for name, low, high in (("ocr_workers", 0, 32), ("ocr_page_timeout", 5, 600), ("pdf_timeout", 30, 86400)):
+        value = getattr(args, name)
+        if value is not None and not low <= value <= high:
+            raise ValueError(f"--{name.replace('_', '-')} должен быть от {low} до {high}")
+
     config_lo = application.get("libreoffice_path")
     config_ts = application.get("tesseract_path")
     # Пути из переносимого JSON могли относиться к другому компьютеру.
@@ -307,6 +319,10 @@ def _apply_runtime_application_settings(args: argparse.Namespace, config: Mappin
         "DSP_SCANNER_MAX_WORKERS": args.workers if args.workers is not None else application.get("max_workers"),
         "DSP_SCANNER_MAX_MATCHES": args.max_matches if args.max_matches is not None else application.get("max_matches_per_word"),
     }
+    for field in ("ocr_model_tier", "ocr_quality", "russian_only", "ocr_force", "ocr_workers",
+                  "ocr_page_timeout", "pdf_timeout"):
+        value = getattr(args, field)
+        overrides["DSP_SCANNER_" + field.upper()] = value if value is not None else application.get(field)
     for name, value in overrides.items():
         if value is not None and str(value).strip():
             os.environ[name] = str(value)
