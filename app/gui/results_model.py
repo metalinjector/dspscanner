@@ -224,6 +224,25 @@ def _html_text(text: str) -> str:
     return escape(str(text), quote=True).replace("\n", "<br>")
 
 
+# Склейка переносов строк OCR в сплошной поток слов с сохранением абзацев:
+# одиночные переносы (конец строки скана) схлопываются в пробел, а пустая
+# строка между строками текста остаётся разделителем абзацев (\n\n),
+# который GUI отображает как разрыв. Порядок слов не меняется.
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n[ \t]*\n+")
+_INLINE_REFLOW_RE = re.compile(r"\s+")
+
+
+def _reflow_text(text: str) -> str:
+    """Склеивает одиночные переносы строк, сохраняя пустые строки (абзацы)."""
+    if not text:
+        return text
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = [p.strip() for p in _PARAGRAPH_SPLIT_RE.split(text)]
+    paragraphs = [p for p in paragraphs if p]
+    reflowed = (_INLINE_REFLOW_RE.sub(" ", p) for p in paragraphs)
+    return "\n\n".join(reflowed)
+
+
 def highlight_html(text: str, matched_text: str, color: str) -> str:
     """Экранирует текст и выделяет все совпадения безопасным HTML."""
     if not text or not matched_text:
@@ -252,7 +271,7 @@ def result_tooltip_html(result: SearchResult) -> str:
         fragment = highlight_html(result.file_name, matched, color)
         caption = "Совпадение в названии файла"
     else:
-        source = result.tooltip_context or result.context
+        source = _reflow_text(result.tooltip_context or result.context)
         fragment = highlight_html(source, matched, color)
         caption = "Расширенный фрагмент текста файла"
     return (
@@ -288,7 +307,7 @@ def file_tooltip_html(full_path: str, results: Iterable[SearchResult]) -> str:
     for result in results:
         filename_match = is_filename_match(result)
         matched = result.matched_text or result.word
-        source = result.tooltip_context or result.context
+        source = _reflow_text(result.tooltip_context or result.context)
         key = (source, matched.casefold(), filename_match)
         if key in seen:
             continue
@@ -306,7 +325,7 @@ def file_tooltip_html(full_path: str, results: Iterable[SearchResult]) -> str:
             blocks.extend([
                 '<br><br>',
                 highlight_html(
-                    result.tooltip_context or result.context,
+                    _reflow_text(result.tooltip_context or result.context),
                     matched,
                     CONTENT_MATCH_COLOR,
                 ),

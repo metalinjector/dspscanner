@@ -18,6 +18,7 @@ from app.config import SearchResult
 from app.gui.results_model import (
     CONTENT_MATCH_COLOR,
     FILENAME_MATCH_COLOR,
+    _reflow_text,
     highlight_html,
     is_filename_match,
 )
@@ -80,6 +81,12 @@ class ResultContextsDialog(QDialog):
                 if filename_match
                 else result.detail_context or result.tooltip_context or result.context
             )
+            # Текст из OCR содержит переносы строк по ширине скана: карточка
+            # выглядела «рваной» — короткие строки по одной на строчку скана.
+            # Склеиваем в сплошной поток: слова идут в исходном порядке,
+            # текст занимает всю ширину карточки от края до края.
+            if not filename_match:
+                source = _reflow_text(source)
             matched = result.matched_text or result.word
             source_label = "название файла" if filename_match else "содержимое файла"
             # Когда карточки относятся к разным терминам (вызов из «Файлов»),
