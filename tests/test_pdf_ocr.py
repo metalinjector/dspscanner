@@ -180,8 +180,9 @@ def test_model_paths_and_openmp(tmp_path, monkeypatch):
     monkeypatch.delenv('TESSDATA_PREFIX', raising=False)
     assert pdf._ocr_tessdata_dir(str(binary), 'fast') is None
     assert 'TESSDATA_PREFIX' not in pdf._tesseract_environment(str(binary))
-    monkeypatch.setenv('TESSDATA_PREFIX', '/explicit/data')
-    assert pdf._tesseract_environment(str(binary))['TESSDATA_PREFIX'] == '/explicit/data'
+    explicit = tmp_path / 'explicit data'
+    monkeypatch.setenv('TESSDATA_PREFIX', explicit.as_posix())
+    assert Path(pdf._tesseract_environment(str(binary))['TESSDATA_PREFIX']) == explicit
     tier = tmp_path / 'tessdata-best'
     tier.mkdir()
     (tier / 'eng.traineddata').touch()

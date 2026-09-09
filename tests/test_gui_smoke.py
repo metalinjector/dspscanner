@@ -22,10 +22,35 @@ from app.gui.results_model import ResultsTableModel, highlight_html, is_filename
 from app.gui.workers import SingleFileTestWorker
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def qt_app():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _dispose_gui_objects(qt_app):
+    """Destroy widgets with Qt alive, not during interpreter finalization.
+
+    close() only hides most widgets. Signal/slot cycles can keep their wrappers
+    alive until shutdown, when Qt and Python may destroy them in either order.
+    Explicit DeferredDelete processing also covers dialogs using deleteLater().
+    """
+    import gc
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from shiboken6 import isValid
+
+    yield
+    widgets = list(qt_app.topLevelWidgets())
+    for widget in widgets:
+        if isValid(widget):
+            widget.close()
+            widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert all(not isValid(widget) for widget in widgets)
+    widgets.clear()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def _result(name="a.txt", word="договор", context="в тексте договор найден"):
@@ -377,10 +402,16 @@ def test_single_file_diagnostic_runs_outside_gui_thread(qt_app, tmp_path):
     loop = QEventLoop()
     worker.finished_ok.connect(lambda outcome, elapsed: (captured.update(outcome=outcome), loop.quit()))
     worker.failed.connect(lambda message: (captured.update(error=message), loop.quit()))
-    QTimer.singleShot(60_000, loop.quit)
-    worker.start()
-    loop.exec()
-    worker.wait(10_000)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(60_000)
+    try:
+        worker.start()
+        loop.exec()
+    finally:
+        timeout.stop()
+        assert worker.wait(10_000)
 
     assert "error" not in captured, captured.get("error")
     assert "договоре" in captured["outcome"].text
@@ -394,10 +425,16 @@ def test_diagnostic_worker_reports_unreadable_file_without_raising(qt_app, tmp_p
     loop = QEventLoop()
     worker.finished_ok.connect(lambda outcome, elapsed: (captured.update(outcome=outcome), loop.quit()))
     worker.failed.connect(lambda message: (captured.update(error=message), loop.quit()))
-    QTimer.singleShot(30_000, loop.quit)
-    worker.start()
-    loop.exec()
-    worker.wait(10_000)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(30_000)
+    try:
+        worker.start()
+        loop.exec()
+    finally:
+        timeout.stop()
+        assert worker.wait(10_000)
 
     assert "error" not in captured
     assert captured["outcome"].error
