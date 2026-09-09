@@ -22,10 +22,35 @@ from app.gui.results_model import ResultsTableModel, highlight_html, is_filename
 from app.gui.workers import SingleFileTestWorker
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def qt_app():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _dispose_gui_objects(qt_app):
+    """Destroy widgets with Qt alive, not during interpreter finalization.
+
+    close() only hides most widgets. Signal/slot cycles can keep their wrappers
+    alive until shutdown, when Qt and Python may destroy them in either order.
+    Explicit DeferredDelete processing also covers dialogs using deleteLater().
+    """
+    import gc
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from shiboken6 import isValid
+
+    yield
+    widgets = list(qt_app.topLevelWidgets())
+    for widget in widgets:
+        if isValid(widget):
+            widget.close()
+            widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert all(not isValid(widget) for widget in widgets)
+    widgets.clear()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def _result(name="a.txt", word="договор", context="в тексте договор найден"):
@@ -377,10 +402,16 @@ def test_single_file_diagnostic_runs_outside_gui_thread(qt_app, tmp_path):
     loop = QEventLoop()
     worker.finished_ok.connect(lambda outcome, elapsed: (captured.update(outcome=outcome), loop.quit()))
     worker.failed.connect(lambda message: (captured.update(error=message), loop.quit()))
-    QTimer.singleShot(60_000, loop.quit)
-    worker.start()
-    loop.exec()
-    worker.wait(10_000)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(60_000)
+    try:
+        worker.start()
+        loop.exec()
+    finally:
+        timeout.stop()
+        assert worker.wait(10_000)
 
     assert "error" not in captured, captured.get("error")
     assert "договоре" in captured["outcome"].text
@@ -394,10 +425,16 @@ def test_diagnostic_worker_reports_unreadable_file_without_raising(qt_app, tmp_p
     loop = QEventLoop()
     worker.finished_ok.connect(lambda outcome, elapsed: (captured.update(outcome=outcome), loop.quit()))
     worker.failed.connect(lambda message: (captured.update(error=message), loop.quit()))
-    QTimer.singleShot(30_000, loop.quit)
-    worker.start()
-    loop.exec()
-    worker.wait(10_000)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(30_000)
+    try:
+        worker.start()
+        loop.exec()
+    finally:
+        timeout.stop()
+        assert worker.wait(10_000)
 
     assert "error" not in captured
     assert captured["outcome"].error
@@ -1436,3 +1473,26 @@ def test_plain_help_text_is_not_forced_into_rich_text(window):
         assert dialog.textFormat() == Qt.TextFormat.AutoText
     finally:
         dialog.deleteLater()
+
+
+def test_ocr_settings_roundtrip(qt_app, monkeypatch):
+    from app.gui import settings_dialog
+    from app.settings_store import AppSettings
+    monkeypatch.setattr(settings_dialog, 'load_settings', lambda: AppSettings())
+    captured = []
+    monkeypatch.setattr(settings_dialog, 'save_settings', lambda value: captured.append(value) or True)
+    dialog = settings_dialog.SettingsDialog()
+    dialog.ocr_quality.setCurrentIndex(1)
+    dialog.ocr_model_tier.setCurrentIndex(2)
+    dialog.russian_only.setChecked(False)
+    dialog.ocr_force.setChecked(True)
+    dialog.ocr_workers.setValue(4)
+    dialog.ocr_page_timeout.setValue(90)
+    dialog.pdf_timeout.setValue(3600)
+    dialog._accept()
+    assert captured[0].ocr_quality == 'thorough'
+    assert captured[0].ocr_model_tier == 'best'
+    assert captured[0].russian_only is False and captured[0].ocr_force is True
+    assert captured[0].ocr_workers == 4 and captured[0].ocr_page_timeout == 90
+    assert captured[0].pdf_timeout == 3600
+    dialog.close()

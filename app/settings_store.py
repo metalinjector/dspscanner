@@ -61,6 +61,12 @@ class AppSettings:
     russian_only: bool = True  # Искать только русский текст (быстрее, чем rus+eng)
     ocr_model_tier: str = "fast"  # Градация моделей OCR: fast / medium / best
 
+    ocr_quality: str = "adaptive"
+    ocr_page_timeout: int = 60
+    pdf_timeout: int = 1800
+    ocr_workers: int = 0
+    ocr_force: bool = False
+
     def sanitized(self) -> "AppSettings":
         def _int(value, default: int, low: int, high: int) -> int:
             try:
@@ -68,6 +74,17 @@ class AppSettings:
             except (TypeError, ValueError, OverflowError):
                 return default
             return min(high, max(low, parsed))
+
+        def _bool(value, default):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (str, int)):
+                text = str(value).strip().lower()
+                if text in {"true", "1", "yes", "on"}:
+                    return True
+                if text in {"false", "0", "no", "off"}:
+                    return False
+            return default
 
         def _path(value) -> Optional[str]:
             if value is None:
@@ -89,9 +106,14 @@ class AppSettings:
             per_file_timeout=_int(self.per_file_timeout, 60, 10, 600),
             max_matches_per_word=_int(self.max_matches_per_word, 50, 1, 500),
             secure_passes=_int(self.secure_passes, 3, 1, 7),
-            reset_stats_on_start=bool(self.reset_stats_on_start),
-            russian_only=bool(self.russian_only),
+            reset_stats_on_start=_bool(self.reset_stats_on_start, True),
+            russian_only=_bool(self.russian_only, True),
             ocr_model_tier=_tier(self.ocr_model_tier),
+            ocr_quality=self.ocr_quality if self.ocr_quality in ("adaptive", "thorough") else "adaptive",
+            ocr_page_timeout=_int(self.ocr_page_timeout, 60, 5, 600),
+            pdf_timeout=_int(self.pdf_timeout, 1800, 30, 86400),
+            ocr_workers=_int(self.ocr_workers, 0, 0, 32),
+            ocr_force=_bool(self.ocr_force, False),
         )
 
     def to_mapping(self) -> dict:
@@ -116,6 +138,11 @@ def _apply_environment_overrides(settings: AppSettings) -> AppSettings:
         "DSP_SCANNER_SECURE_PASSES": "secure_passes",
         "DSP_SCANNER_RUSSIAN_ONLY": "russian_only",
         "DSP_SCANNER_OCR_MODEL_TIER": "ocr_model_tier",
+        "DSP_SCANNER_OCR_QUALITY": "ocr_quality",
+        "DSP_SCANNER_OCR_PAGE_TIMEOUT": "ocr_page_timeout",
+        "DSP_SCANNER_PDF_TIMEOUT": "pdf_timeout",
+        "DSP_SCANNER_OCR_WORKERS": "ocr_workers",
+        "DSP_SCANNER_OCR_FORCE": "ocr_force",
     }
     values = asdict(settings)
     for env_name, field_name in mapping.items():
