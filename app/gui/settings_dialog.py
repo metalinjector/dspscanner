@@ -130,6 +130,11 @@ class SettingsDialog(QDialog):
             getattr(s, "ocr_model_tier", "fast"), 0
         )
         self.ocr_model_tier.setCurrentIndex(tier_index)
+        # Раскрывать список целиком, без прокрутки
+        self.ocr_model_tier.setMaxVisibleItems(self.ocr_model_tier.count())
+        self.ocr_model_tier.setStyleSheet(
+            "QComboBox QAbstractItemView { min-height: 96px; }"
+        )
         self.ocr_model_tier.setToolTip(
             "Градация моделей Tesseract (каталоги tessdata-fast/medium/best\n"
             "рядом с tesseract.exe):\n"
@@ -142,9 +147,20 @@ class SettingsDialog(QDialog):
         self.ocr_quality = QComboBox()
         self.ocr_quality.addItem("Адаптивный (200 → 300 DPI)", "adaptive")
         self.ocr_quality.addItem("Тщательный (300 DPI)", "thorough")
-        self.ocr_quality.setCurrentIndex(1 if s.ocr_quality == "thorough" else 0)
+        self.ocr_quality.addItem("Быстрый, один проход (150 DPI)", "fast150")
+        quality_index = {"adaptive": 0, "thorough": 1, "fast150": 2}.get(
+            getattr(s, "ocr_quality", "adaptive"), 0
+        )
+        self.ocr_quality.setCurrentIndex(quality_index)
+        # Показывать все пункты сразу, не обрезая список
+        self.ocr_quality.setMaxVisibleItems(self.ocr_quality.count())
+        self.ocr_quality.setStyleSheet(
+            "QComboBox QAbstractItemView { min-height: 96px; }"
+        )
         self.ocr_quality.setToolTip("Адаптивный режим повторяет сомнительные области. "
-                                   "Тщательный сразу использует 300 DPI; OCR может ошибаться в обоих режимах.")
+                                   "Тщательный сразу использует 300 DPI; OCR может ошибаться в обоих режимах.\n"
+                                   "Быстрый: один проход на 150 DPI без повторов — максимум скорости, "
+                                   "точность ниже; мелкий текст может не распознаться.")
         ext_layout.addRow("Качество сканов:", self.ocr_quality)
         self.ocr_force = QCheckBox("Повторно распознавать все страницы PDF")
         self.ocr_force.setChecked(s.ocr_force)

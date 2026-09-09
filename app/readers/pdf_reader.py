@@ -303,7 +303,7 @@ class PdfReader(BaseReader):
             except Exception as exc:
                 warnings.append(f"стр. {index + 1}: сопоставление текстового слоя: {exc}")
                 duplicate_sources[index] = ""
-        first_dpi = 300 if settings.ocr_quality == "thorough" else 200
+        first_dpi = {"thorough": 300, "fast150": 150}.get(settings.ocr_quality, 200)
         jobs = deque((index, part, box, first_dpi, None) for index in page_indices
                      for part, box in enumerate(regions.get(index, [None])))
         remaining = {index: len(regions.get(index, [None])) for index in page_indices}
@@ -365,7 +365,8 @@ class PdfReader(BaseReader):
                         warnings.append(f"стр. {index + 1}: OCR: {exc}")
                         finish(index, part, previous or OcrResult(""))
                         continue
-                    if previous is None and result.needs_retry and (dpi < 300 or not result.text.strip()):
+                    if (settings.ocr_quality != "fast150"
+                            and previous is None and result.needs_retry and (dpi < 300 or not result.text.strip())):
                         jobs.appendleft((index, part, box, 300, result))
                         continue
                     if previous is not None and previous.score > result.score:
