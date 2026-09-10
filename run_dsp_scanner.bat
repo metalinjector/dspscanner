@@ -9,10 +9,10 @@ set "APP_DIR=%~dp0"
 rem Tesseract: portable bundle with tessdata-fast/medium/best tiers
 set "DSP_SCANNER_TESSERACT_PATH=%APP_DIR%Tesseract-OCR\tesseract.exe"
 
-rem OCR defaults: fast model, adaptive quality, auto worker count (0)
-set "DSP_SCANNER_OCR_MODEL_TIER=fast"
-set "DSP_SCANNER_OCR_QUALITY=adaptive"
-set "DSP_SCANNER_OCR_WORKERS=0"
+rem OCR defaults: fast model, auto worker count (0).
+rem DSP_SCANNER_OCR_QUALITY is NOT set here on purpose: the quality mode
+rem (adaptive/thorough/fast150) comes from the user's settings.json.
+rem Set it in this file only to force a mode for every launch.
 
 rem Russian-only for Russian documents (use 0 for mixed rus+eng)
 set "DSP_SCANNER_RUSSIAN_ONLY=1"

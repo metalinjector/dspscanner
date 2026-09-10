@@ -145,11 +145,12 @@ class SettingsDialog(QDialog):
         ext_layout.addRow("Модель OCR:", self.ocr_model_tier)
 
         self.ocr_quality = QComboBox()
+        self.ocr_quality.addItem("Быстрый A2 (250 DPI, один проход)", "a2fast")
         self.ocr_quality.addItem("Адаптивный (200 → 300 DPI)", "adaptive")
         self.ocr_quality.addItem("Тщательный (300 DPI)", "thorough")
         self.ocr_quality.addItem("Быстрый, один проход (150 DPI)", "fast150")
-        quality_index = {"adaptive": 0, "thorough": 1, "fast150": 2}.get(
-            getattr(s, "ocr_quality", "adaptive"), 0
+        quality_index = {"a2fast": 0, "adaptive": 1, "thorough": 2, "fast150": 3}.get(
+            getattr(s, "ocr_quality", "a2fast"), 0
         )
         self.ocr_quality.setCurrentIndex(quality_index)
         # Показывать все пункты сразу, не обрезая список

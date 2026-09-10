@@ -18,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('files', nargs='+', type=Path)
     parser.add_argument('--term', action='append', required=True)
-    parser.add_argument('--quality', choices=('adaptive', 'thorough'), default='adaptive')
+    parser.add_argument('--quality', choices=('a2fast', 'adaptive', 'thorough', 'fast150'), default='a2fast')
     parser.add_argument('--tier', choices=('fast', 'medium', 'best'), default='fast')
     parser.add_argument('--russian-only', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--repeat', type=int, default=2)

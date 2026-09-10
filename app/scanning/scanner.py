@@ -434,20 +434,46 @@ class DocumentScanner:
                 entry.extension in _RISKY_EXTENSIONS
                 or (entry.extension == ".docx" and entry.size >= _ISOLATE_DOCX_ABOVE_BYTES)
             )
+            if isolate and entry.extension == ".pdf":
+                key = pdf_cache.cache_key(entry.path, active_settings, app_settings)
+                flight, own = pdf_cache.begin(key)
+                outcome_holder = {}
+                if not own:
+                    while not flight.event.wait(0.2):
+                        if cancel_event.is_set():
+                            return [], None, "Операция отменена", False
+                    outcome = flight.outcome
+                    if outcome is not None and outcome.text:
+                        stats.cache_hits += 1
+                        return self._process_one_direct(entry, active_settings, outcome)
+                    # Владелец не дал текста (ошибка/таймаут): честно читаем сами.
+                try:
+                    cached = pdf_cache.get(key)
+                    if cached is not None:
+                        stats.cache_hits += 1
+                        return self._process_one_direct(entry, active_settings, cached)
+                    if key is not None:
+                        stats.cache_misses += 1
+                    outcome_holder = {}
+
+                    def remember(outcome):
+                        # Первый outcome публикуется и в кэш, и ожидающим дублям.
+                        # Повторная проверка ключа: файл мог измениться во время
+                        # OCR — устаревший текст не кэшируем (но дублям отдаём).
+                        if "outcome" not in outcome_holder:
+                            outcome_holder["outcome"] = outcome
+                            if pdf_cache.cache_key(entry.path, active_settings, app_settings) == key:
+                                pdf_cache.put(key, outcome)
+
+                    result = _run_isolated(entry, active_settings, per_file_timeout,
+                                           cancel_event, ocr_budget, remember)
+                    pdf_cache.end(key, flight, outcome_holder.get("outcome"))
+                    return result
+                finally:
+                    # Гарантия публикации даже при исключении в _run_isolated.
+                    pdf_cache.end(key, flight, outcome_holder.get("outcome"))
             if isolate:
-                key = pdf_cache.cache_key(entry.path, active_settings, app_settings) if entry.extension == ".pdf" else None
-                cached = pdf_cache.get(key)
-                if cached is not None:
-                    stats.cache_hits += 1
-                    return self._process_one_direct(entry, active_settings, cached)
-                if key is not None:
-                    stats.cache_misses += 1
-
-                def remember(outcome):
-                    if key is not None and pdf_cache.cache_key(entry.path, active_settings, app_settings) == key:
-                        pdf_cache.put(key, outcome)
-
-                return _run_isolated(entry, active_settings, per_file_timeout, cancel_event, ocr_budget, remember)
+                return _run_isolated(entry, active_settings, per_file_timeout, cancel_event)
             return self._process_one_direct(entry, active_settings)
 
         def acquire_slot(semaphore: BoundedSemaphore) -> bool:

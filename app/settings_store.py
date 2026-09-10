@@ -61,7 +61,9 @@ class AppSettings:
     russian_only: bool = True  # Искать только русский текст (быстрее, чем rus+eng)
     ocr_model_tier: str = "fast"  # Градация моделей OCR: fast / medium / best
 
-    ocr_quality: str = "adaptive"  # adaptive | thorough | fast150
+    # A2fast — алгоритм DSP Scanner 2.9.7 (python_app_A2): один проход 250 DPI,
+    # без ретраев; OCR только у страниц с пустым/битым текстовым слоем.
+    ocr_quality: str = "a2fast"  # a2fast | adaptive | thorough | fast150
     ocr_page_timeout: int = 60
     pdf_timeout: int = 1800
     ocr_workers: int = 0
@@ -109,7 +111,7 @@ class AppSettings:
             reset_stats_on_start=_bool(self.reset_stats_on_start, True),
             russian_only=_bool(self.russian_only, True),
             ocr_model_tier=_tier(self.ocr_model_tier),
-            ocr_quality=self.ocr_quality if self.ocr_quality in ("adaptive", "thorough", "fast150") else "adaptive",
+            ocr_quality=self.ocr_quality if self.ocr_quality in ("a2fast", "adaptive", "thorough", "fast150") else "a2fast",
             ocr_page_timeout=_int(self.ocr_page_timeout, 60, 5, 600),
             pdf_timeout=_int(self.pdf_timeout, 1800, 30, 86400),
             ocr_workers=_int(self.ocr_workers, 0, 0, 32),

@@ -7,7 +7,7 @@ import sys
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
 from app.readers.pdf_reader import _ocr_tessdata_dir
 
@@ -15,6 +15,49 @@ _LIMIT = 64 * 1024 * 1024
 _lock = Lock()
 _entries = OrderedDict()
 _size = 0
+
+# Single-flight (дедупликация байтовых копий, как md5-дедуп в ocr_scanner_final):
+# ключ → хендл в полёте. Второй файл с тем же содержимым ждёт первого и берёт
+# его результат напрямую из хендла (даже с warnings, которые постоянный кэш
+# не принимает), вместо параллельного повторного OCR (cache stampede).
+class _Inflight:
+    __slots__ = ("event", "outcome")
+
+    def __init__(self):
+        from threading import Event
+        self.event = Event()
+        self.outcome = None
+
+
+_inflight: dict = {}
+_inflight_lock = Lock()
+
+
+def begin(key):
+    """Занять ключ. Возвращает (handle, is_owner): владелец обязан вызвать
+    end(key, handle, outcome); не-владелец ждёт handle.event и читает
+    handle.outcome после срабатывания."""
+    if key is None:
+        return None, False
+    with _inflight_lock:
+        flight = _inflight.get(key)
+        if flight is None:
+            flight = _Inflight()
+            _inflight[key] = flight
+            return flight, True
+        return flight, False
+
+
+def end(key, flight, outcome=None) -> None:
+    """Освободить ключ, опубликовать результат и разбудить ожидающих."""
+    if key is None or flight is None:
+        return
+    if outcome is not None:
+        flight.outcome = outcome
+    with _inflight_lock:
+        if _inflight.get(key) is flight:
+            del _inflight[key]
+    flight.event.set()
 
 
 def cache_key(path, scan, app):
@@ -37,7 +80,11 @@ def cache_key(path, scan, app):
                 return None
             models = tuple((str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns)
                            for p in [binary, *sorted(directory.glob('*.traineddata'))])
-        return ('ocr-v2', str(path.resolve()), digest.hexdigest(), stat.st_mtime_ns,
+        # Ключ НЕ включает путь файла: байтовые копии одного PDF (разные имена,
+        # разные каталоги) делят одну запись кэша, и их OCR не выполняется дважды.
+        # Идентичность гарантирует digest всего содержимого + неизменность stat
+        # во время чтения; путь в ключе лишь дублировал одинаковые результаты.
+        return ('ocr-v2', digest.hexdigest(), stat.st_size,
                 scan.use_ocr_for_pdf, scan.limit_pdf_pages, scan.pdf_page_limit,
                 app.russian_only, app.ocr_model_tier, app.ocr_quality, app.ocr_force,
                 os.environ.get('TESSDATA_PREFIX'), models)

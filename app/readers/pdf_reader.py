@@ -128,7 +128,13 @@ class OcrResult:
 
     @property
     def needs_retry(self) -> bool:
-        return (not self.text.strip() or self.confidence < 85 or self.low_fraction > .15
+        # Уверенность < 85 сама по себе — НЕ повод для повторного прохода:
+        # у чистых сканов газет 73-83% является нормой (замер на реальном
+        # корпусе: adaptive 200->300 vs один проход 150 DPI давали идентичные
+        # совпадения при +40% времени). Ретрай остаётся для действительно
+        # подозрительных страниц: пустой текст, галлюцинации cid/мусор,
+        # >15% слов с conf<60, мелкие глифы (upscale может помочь).
+        return (not self.text.strip() or self.low_fraction > .15
                 or self.median_height < 12 or _looks_garbled(self.text))
 
     @property
@@ -218,7 +224,15 @@ class PdfReader(BaseReader):
                         _progress(index, text)
                         if not use_ocr:
                             continue
-                        if settings.ocr_force or not text.strip() or _looks_garbled(text):
+                        if settings.ocr_force:
+                            pending.append(index)
+                        elif settings.ocr_quality == "a2fast":
+                            # A2fast (алгоритм DSP Scanner 2.9.7): OCR нужен только
+                            # страницам с пустым или битым текстовым слоем; страница
+                            # с нормальным текстом не распознаётся вообще.
+                            if not text.strip() or _looks_garbled(text):
+                                pending.append(index)
+                        elif not text.strip() or _looks_garbled(text):
                             pending.append(index)
                         else:
                             image_info = page.get_image_info()
@@ -303,7 +317,7 @@ class PdfReader(BaseReader):
             except Exception as exc:
                 warnings.append(f"стр. {index + 1}: сопоставление текстового слоя: {exc}")
                 duplicate_sources[index] = ""
-        first_dpi = {"thorough": 300, "fast150": 150}.get(settings.ocr_quality, 200)
+        first_dpi = {"thorough": 300, "fast150": 150, "a2fast": 250}.get(settings.ocr_quality, 200)
         jobs = deque((index, part, box, first_dpi, None) for index in page_indices
                      for part, box in enumerate(regions.get(index, [None])))
         remaining = {index: len(regions.get(index, [None])) for index in page_indices}
@@ -365,7 +379,7 @@ class PdfReader(BaseReader):
                         warnings.append(f"стр. {index + 1}: OCR: {exc}")
                         finish(index, part, previous or OcrResult(""))
                         continue
-                    if (settings.ocr_quality != "fast150"
+                    if (settings.ocr_quality not in ("fast150", "a2fast")
                             and previous is None and result.needs_retry and (dpi < 300 or not result.text.strip())):
                         jobs.appendleft((index, part, box, 300, result))
                         continue

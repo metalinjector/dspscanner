@@ -20,7 +20,9 @@ from app.settings_store import AppSettings, _apply_environment_overrides
 
 @pytest.fixture
 def settings(monkeypatch):
-    value = AppSettings(tesseract_path=sys.executable)
+    # Регрессионные тесты в этом файле описывают поведение adaptive-режима;
+    # качество задаётся явно, т.к. дефолт приложения теперь a2fast.
+    value = AppSettings(tesseract_path=sys.executable, ocr_quality='adaptive')
     monkeypatch.setattr(pdf, 'load_settings', lambda: value)
     monkeypatch.setattr(pdf, '_resolve_ocr_lang', lambda *args: 'rus')
     monkeypatch.setattr(pdf, '_ocr_tessdata_dir', lambda *args: Path('/models/tessdata-fast'))
@@ -117,6 +119,41 @@ def test_thorough_starts_at_300(settings, monkeypatch):
     install_ocr(monkeypatch, lambda *args: good())
     pdf.PdfReader._ocr_pages(doc, [0], 'input')
     assert [dpi for _, dpi, *_ in doc.calls] == [300]
+
+
+def test_a2fast_single_pass_250_dpi_no_retry(settings, monkeypatch):
+    # A2fast (алгоритм 2.9.7): один проход на 250 DPI; низкая уверенность
+    # сама по себе не вызывает повторного распознавания.
+    doc, calls = FakeDocument(), []
+    def recognize(i, dpi, psm):
+        calls.append(dpi)
+        return pdf.OcrResult('текст', 70, 0, 3, 15)
+    install_ocr(monkeypatch, recognize)
+    settings.ocr_quality = 'a2fast'
+    texts, used, warning = pdf.PdfReader._ocr_pages(doc, [0], 'input')
+    assert calls == [250] and used and texts[0] == 'текст'
+
+
+def test_a2fast_skips_pages_with_text_layer(settings, monkeypatch):
+    # Страница с нормальным текстовым слоем не распознаётся вовсе;
+    # пустая страница — распознаётся.
+    path_calls = []
+    monkeypatch.setattr(pdf.PdfReader, '_ocr_pages',
+                        lambda self, doc, idx, name, **kw: path_calls.extend(idx) or ({}, False, None))
+    settings.ocr_quality = 'a2fast'
+    import fitz as _fitz
+    with _fitz.open() as tmp:
+        page_text = tmp.new_page()
+        page_text.insert_text((20, 20), 'HEADER 1')
+        page_blank = tmp.new_page()
+        pix = _fitz.Pixmap(_fitz.csGRAY, _fitz.IRect(0, 0, 50, 50), False)
+        pix.clear_with(255)
+        page_blank.insert_image(_fitz.Rect(20, 50, 400, 700), stream=pix.tobytes('png'))
+        tmp.save('a2fast_check.pdf')
+    outcome = pdf.PdfReader().extract_text(Path('a2fast_check.pdf'))
+    assert 'HEADER 1' in outcome.text
+    assert path_calls == [1], 'OCR должен получить только страницу без текста'
+    Path('a2fast_check.pdf').unlink(missing_ok=True)
 
 
 def test_render_error_does_not_drop_other_pages(settings, monkeypatch):

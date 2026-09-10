@@ -101,7 +101,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     reading.add_argument("--ocr-model-tier", choices=("fast", "medium", "best"), help="набор моделей OCR")
-    reading.add_argument("--ocr-quality", choices=("adaptive", "thorough", "fast150"), help="адаптивный, тщательный или быстрый (150 DPI, один проход) OCR")
+    reading.add_argument("--ocr-quality", choices=("a2fast", "adaptive", "thorough", "fast150"), help="быстрый A2 (250 DPI, как в 2.9.7), адаптивный, тщательный или быстрый (150 DPI, один проход) OCR")
     reading.add_argument("--russian-only", action=argparse.BooleanOptionalAction, default=None, help="rus вместо rus+eng")
     reading.add_argument("--ocr-force", action=argparse.BooleanOptionalAction, default=None, help="OCR всех страниц PDF")
     reading.add_argument("--ocr-workers", type=int, help="общий лимит процессов OCR: 0 (авто) — 32")
