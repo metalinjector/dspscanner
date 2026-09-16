@@ -15,14 +15,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.config import MAX_OCR_WORKERS_LIMIT, auto_ocr_workers
 from app.readers.base import BaseReader, ReaderOutcome
 from app.settings_store import autodetect_external_programs, load_settings
 
 logger = logging.getLogger("dspscanner")
-_OCR_LIMIT = min(8, max(1, os.cpu_count() or 1))
+# Верхняя граница одновременных OCR-процессов. Больше, чем логических CPU,
+# бессмысленно: каждый процесс Tesseract однопоточный (OMP_THREAD_LIMIT=1).
+_CPU_COUNT = max(1, os.cpu_count() or 1)
+_OCR_WORKERS_CAP = min(32, _CPU_COUNT)
+# Авто-значение по умолчанию: по числу CPU, а не жёсткие 8 (замер на реальном
+# корпусе: 8 процессов — 29,7 с, 32 — 15,2 с, совпадения те же).
+_OCR_LIMIT = auto_ocr_workers()
 _OCR_MAX_PIXELS = 40_000_000
 _OCR_TARGET_DPI = 300
-_OCR_RASTER_BUDGET = 128 * 1024 * 1024
+# Бюджет растров «в полёте». Раньше 128 МБ: при 150 DPI это ~38 страниц, но в
+# режиме a2fast (250 DPI) — только 22, и 32 воркера простаивали в ожидании
+# растра. Привязан к пределу воркеров, чтобы каждый имел свою страницу.
+_OCR_PAGE_BYTES_AT_250_DPI = 6_100_000
+_OCR_RASTER_BUDGET = max(128 * 1024 * 1024, _OCR_WORKERS_CAP * _OCR_PAGE_BYTES_AT_250_DPI)
 _CID_RE = re.compile(r"\(cid:\d+\)")
 _PROGRESS_CALLBACK = None
 _CAPACITY_CALLBACK = None
@@ -33,7 +44,7 @@ _DEFAULT_OCR_TIER = "fast"
 def configure_ocr_limit(limit: int, progress_callback=None, capacity_callback=None) -> None:
     """Configure an isolated process. Callbacks are invoked only by the owner thread."""
     global _OCR_LIMIT, _PROGRESS_CALLBACK, _CAPACITY_CALLBACK
-    _OCR_LIMIT = max(1, min(32, int(limit)))
+    _OCR_LIMIT = max(1, min(MAX_OCR_WORKERS_LIMIT, int(limit)))
     _PROGRESS_CALLBACK = progress_callback
     _CAPACITY_CALLBACK = capacity_callback
 
@@ -323,7 +334,7 @@ class PdfReader(BaseReader):
         remaining = {index: len(regions.get(index, [None])) for index in page_indices}
         pieces = {index: {} for index in page_indices}
         output = {}
-        workers = min(_OCR_LIMIT, settings.ocr_workers or 8, max(1, len(jobs)))
+        workers = min(_OCR_LIMIT, settings.ocr_workers or _OCR_LIMIT, max(1, len(jobs)))
         if _CAPACITY_CALLBACK is not None:
             _CAPACITY_CALLBACK(workers)
         futures, retained_bytes = {}, 0

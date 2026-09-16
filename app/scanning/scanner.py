@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 from app.config import (
     DocReadMethod, ErrorEntry, FileEntry, ScanReport, ScanSettings, ScanStats, SearchResult,
+    auto_ocr_workers,
 )
 from app.readers import extract_text
 from app.readers.base import ReaderOutcome
@@ -48,7 +49,14 @@ PRECOUNT_MESSAGE = "Предварительный подсчёт файлов"
 _PRECOUNT_REPORT_EVERY = 250
 _ISOLATE_DOCX_ABOVE_BYTES = 16 * 1024 * 1024
 _CPU_COUNT = max(1, os.cpu_count() or 1)
-_RISKY_PROCESS_LIMIT = min(4, max(1, _CPU_COUNT // 2))
+# Сколько изолированных процессов чтения (PDF/DOC) пускать одновременно.
+# Раньше было жёстко min(4, cpu//2): на 16-ядерной машине в работе находились
+# всего 4 файла, и на корпусе из мелких PDF это упиралось в потолок — замер
+# показал, что увеличение OCR-воркеров с 8 до 32 не давало ничего (x0,97),
+# потому что одновременно читалось лишь 4 файла по одной странице. Теперь
+# предел растёт с числом ядер, но остаётся консервативным: каждый процесс
+# держит свой MuPDF и растр, а изоляция нужна против зависаний на битых PDF.
+_RISKY_PROCESS_LIMIT = max(4, min(16, _CPU_COUNT // 2))
 _RISKY_SEMAPHORE = BoundedSemaphore(_RISKY_PROCESS_LIMIT)
 
 
@@ -408,7 +416,7 @@ class DocumentScanner:
             else:
                 on_progress(0, 0, "Поиск файлов и запуск обработки…")
         per_file_timeout = app_settings.per_file_timeout
-        ocr_budget = _OcrBudget(min(_CPU_COUNT, app_settings.ocr_workers or 8))
+        ocr_budget = _OcrBudget(min(_CPU_COUNT, app_settings.ocr_workers or auto_ocr_workers()))
         processed_count = 0
 
         def progress_total() -> int:

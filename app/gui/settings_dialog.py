@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QMessageBox, QWidget,
 )
 
-from app.config import MAX_WORKERS_LIMIT
+from app.config import MAX_OCR_WORKERS_LIMIT, MAX_WORKERS_LIMIT, auto_ocr_workers
 from app.settings_store import load_settings, save_settings, autodetect_external_programs
 
 
@@ -203,8 +203,14 @@ class SettingsDialog(QDialog):
         perf_layout.addRow(QLabel("Защита от зависания на повреждённых файлах"))
 
         self.ocr_workers = QSpinBox()
-        self.ocr_workers.setRange(0, 32)
-        self.ocr_workers.setSpecialValueText("Авто (до 8 CPU)")
+        self.ocr_workers.setRange(0, MAX_OCR_WORKERS_LIMIT)
+        self.ocr_workers.setSpecialValueText(f"Авто ({auto_ocr_workers()} CPU)")
+        self.ocr_workers.setToolTip(
+            "Число одновременных процессов Tesseract.\n"
+            f"«Авто» — по числу логических CPU с запасом на интерфейс: сейчас {auto_ocr_workers()}.\n"
+            "Каждый процесс распознаёт одну страницу; больше ядер ускоряет скан,\n"
+            "если файлов достаточно, чтобы их загрузить."
+        )
         self.ocr_workers.setValue(s.ocr_workers)
         perf_layout.addRow("Процессы OCR:", self.ocr_workers)
         self.ocr_page_timeout = QSpinBox()

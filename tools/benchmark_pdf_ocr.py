@@ -8,7 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from app.config import APP_VERSION, ScanSettings
+from app.config import APP_VERSION, ScanSettings, auto_ocr_workers
 from app.readers.pdf_reader import _ocr_tessdata_dir
 from app.scanning.scanner import DocumentScanner
 from app.settings_store import invalidate_settings_cache, load_settings
@@ -39,7 +39,7 @@ def main():
     output = {'version': APP_VERSION, 'engine': engine.stdout.splitlines()[0],
               'cpu_count': os.cpu_count(), 'quality': args.quality, 'tier': args.tier,
               'model_directory': str(directory), 'model_sha256': models,
-              'ocr_workers': app.ocr_workers or min(8, os.cpu_count() or 1), 'runs': []}
+              'ocr_workers': app.ocr_workers or auto_ocr_workers(), 'runs': []}
     scan = ScanSettings(paths=[str(p.resolve()) for p in args.files], words=args.term,
                         file_types={'.pdf'}, max_matches_per_word=10000, max_file_size_mb=1024)
     for number in range(args.repeat):

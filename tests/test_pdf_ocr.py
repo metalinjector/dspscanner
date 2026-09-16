@@ -342,3 +342,89 @@ def test_identical_words_outside_image_are_distinct_occurrences(tmp_path, settin
         doc.save(path)
     monkeypatch.setattr(pdf, '_ocr_image', lambda *args: good('TARGET'))
     assert pdf.PdfReader().extract_text(path).text.count('TARGET') == 2
+
+
+# --------------------------------------------------------------------- #
+# Авто-режим OCR: лимиты должны расти с железом, а не упираться в 8
+# --------------------------------------------------------------------- #
+
+
+def test_auto_ocr_workers_scales_with_cpu(monkeypatch):
+    """Авто-режим использует ядра машины, оставляя запас интерфейсу.
+
+    Замер на реальном корпусе: 8 процессов — 29,7 с, 32 — 15,2 с при том же
+    числе совпадений. Жёсткие 8 оставляли больше половины 16-ядерной машины
+    простаивать.
+    """
+    from app import config
+
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 32)
+    assert config.auto_ocr_workers() == 30, "на 32 CPU ожидаем 30 (запас 2 ядра)"
+
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 16)
+    assert config.auto_ocr_workers() == 14
+
+    # На слабых машинах запас не применяется: иначе осталось бы 1-2 воркера.
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 4)
+    assert config.auto_ocr_workers() == 4
+
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 1)
+    assert config.auto_ocr_workers() == 1
+
+
+def test_auto_ocr_workers_is_capped(monkeypatch):
+    """Выше предела (32) не поднимаемся даже на сервере с сотней ядер."""
+    from app import config
+
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 256)
+    assert config.auto_ocr_workers() == config.MAX_OCR_WORKERS_LIMIT
+
+
+def test_raster_budget_lets_every_worker_hold_a_page():
+    """Бюджет растров должен покрывать всех воркеров при 250 DPI (режим a2fast).
+
+    Старые 128 МБ давали 22 страницы — 32 воркера простаивали в ожидании растра.
+    """
+    pages_at_250_dpi = pdf._OCR_RASTER_BUDGET // pdf._OCR_PAGE_BYTES_AT_250_DPI
+    assert pages_at_250_dpi >= pdf._OCR_WORKERS_CAP, (
+        f"бюджета хватает лишь на {pages_at_250_dpi} страниц при "
+        f"{pdf._OCR_WORKERS_CAP} воркерах"
+    )
+
+
+def test_risky_process_limit_scales_but_stays_bounded(monkeypatch):
+    """Одновременных PDF больше 4 (было жёстко), но с разумным потолком."""
+    from app.scanning import scanner as sc
+
+    assert sc._RISKY_PROCESS_LIMIT > 4, "предел должен расти с числом ядер"
+    assert sc._RISKY_PROCESS_LIMIT <= 16, "и оставаться консервативным"
+
+
+def test_ocr_workers_setting_still_wins_over_auto(monkeypatch):
+    """Явно заданное число процессов важнее авто-режима.
+
+    В настройках можно поставить своё значение (например, притормозить скан,
+    чтобы работать параллельно) — оно не должно перебиваться авто-режимом.
+    """
+    from app.readers.pdf_reader import configure_ocr_limit
+
+    try:
+        configure_ocr_limit(3)
+        assert pdf._OCR_LIMIT == 3, "явный лимит не применился"
+    finally:
+        # Возвращаем как было: соседние тесты полагаются на своё значение.
+        configure_ocr_limit(2)
+
+
+def test_configure_ocr_limit_respects_the_cap():
+    """Лимит извне обрезается общим потолком, а не принимается как есть."""
+    from app.config import MAX_OCR_WORKERS_LIMIT
+    from app.readers.pdf_reader import configure_ocr_limit
+
+    try:
+        configure_ocr_limit(999)
+        assert pdf._OCR_LIMIT == MAX_OCR_WORKERS_LIMIT
+        configure_ocr_limit(0)
+        assert pdf._OCR_LIMIT == 1, "нулевое значение поднимается до одного минимум"
+    finally:
+        configure_ocr_limit(2)

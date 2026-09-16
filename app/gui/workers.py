@@ -10,7 +10,7 @@ from typing import Mapping, Sequence
 
 from PySide6.QtCore import QThread, Signal
 
-from app.config import FileEntry, ScanReport, ScanSettings
+from app.config import FileEntry, ScanReport, ScanSettings, auto_ocr_workers
 from app.email_sender import send_email
 from app.email_settings import EmailSettings
 from app.reporting import export_report
@@ -85,7 +85,7 @@ class SingleFileTestWorker(QThread):
                 captured = []
                 _, warning, error, locked = _run_isolated(
                     entry, self.settings, app_settings.per_file_timeout, Event(),
-                    _OcrBudget(app_settings.ocr_workers or 8), captured.append,
+                    _OcrBudget(app_settings.ocr_workers or auto_ocr_workers()), captured.append,
                 )
                 outcome = captured[-1] if captured else ReaderOutcome(warning=warning, error=error, locked=locked)
                 if error:
