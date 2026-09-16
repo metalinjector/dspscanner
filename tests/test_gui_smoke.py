@@ -1482,8 +1482,9 @@ def test_ocr_settings_roundtrip(qt_app, monkeypatch):
     captured = []
     monkeypatch.setattr(settings_dialog, 'save_settings', lambda value: captured.append(value) or True)
     dialog = settings_dialog.SettingsDialog()
-    dialog.ocr_quality.setCurrentIndex(1)
-    dialog.ocr_model_tier.setCurrentIndex(2)
+    # Индексы берём по data: порядок пунктов — не контракт, a2fast встал первым.
+    dialog.ocr_quality.setCurrentIndex(dialog.ocr_quality.findData('thorough'))
+    dialog.ocr_model_tier.setCurrentIndex(dialog.ocr_model_tier.findData('best'))
     dialog.russian_only.setChecked(False)
     dialog.ocr_force.setChecked(True)
     dialog.ocr_workers.setValue(4)
@@ -1496,3 +1497,140 @@ def test_ocr_settings_roundtrip(qt_app, monkeypatch):
     assert captured[0].ocr_workers == 4 and captured[0].ocr_page_timeout == 90
     assert captured[0].pdf_timeout == 3600
     dialog.close()
+
+# --------------------------------------------------------------------- #
+# Отмена файловых операций: флаг воркера доходит до файлового слоя,
+# а «Стоп» обслуживает и сканирование, и операции над файлами
+# --------------------------------------------------------------------- #
+
+
+def _make_op_files(tmp_path, count):
+    paths = []
+    for index in range(count):
+        item = tmp_path / f"op_file_{index}.txt"
+        item.write_bytes(b"payload " * 500)
+        paths.append(str(item))
+    return paths
+
+
+def test_secure_op_worker_cancel_reaches_the_file_layer(qt_app, tmp_path):
+    """Флаг внутри воркера останавливает обработку реальных файлов."""
+    import time
+
+    from app.gui.workers import SecureOpWorker
+
+    files = _make_op_files(tmp_path, 30)
+    worker = SecureOpWorker("delete", files, passes=1)
+    results = []
+    worker.finished_ok.connect(results.append)
+
+    worker.start()
+    time.sleep(0.05)
+    worker._cancelled = True  # имитируем нажатие «Стоп»
+    assert worker.wait(30_000)
+
+    qt_app.processEvents()
+    assert results, "воркер не отдал результат"
+    result = results[0]
+    assert result.cancelled is True
+    assert result.succeeded < len(files), "отмена не остановила обработку"
+
+
+def test_copy_worker_reports_cancellation(qt_app, tmp_path):
+    """Копирование тоже прерывается, и воркер сообщает об отмене."""
+    import time
+
+    from app.gui.workers import CopyWorker
+
+    files = _make_op_files(tmp_path, 30)
+    destination = tmp_path / "copy_dst"
+    worker = CopyWorker(files, str(destination))
+    results = []
+    worker.finished_ok.connect(results.append)
+
+    worker.start()
+    time.sleep(0.05)
+    worker._cancelled = True
+    assert worker.wait(30_000)
+
+    qt_app.processEvents()
+    assert worker.was_cancelled is True
+    assert results, "воркер не отдал список копий"
+    assert len(results[0]) < len(files), "отмена не остановила копирование"
+
+
+def test_file_operations_do_not_flag_cancellation_without_it(tmp_path):
+    """Обычный прогон не помечается отменённым — иначе отчёт врал бы."""
+    from app.fileops import file_operations as fops
+
+    files = _make_op_files(tmp_path, 3)
+    result = fops.secure_delete_files(files, passes=1)
+    assert result.cancelled is False
+    assert result.succeeded == 3
+
+
+def test_stop_button_greets_the_file_operation_start(window, tmp_path, monkeypatch):
+    """На старте операции кнопка зажигается — иначе прервать её нечем."""
+    from PySide6.QtWidgets import QMessageBox
+
+    source = tmp_path / "src" / "doc.txt"
+    source.parent.mkdir()
+    source.write_text("содержимое", encoding="utf-8")
+    window._on_results_found([
+        SearchResult(source.name, str(source), "содержимое", "содержимое", "txt", "2026")
+    ])
+    window.results_model.set_all_checked(True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
+
+    window._secure_delete_checked()
+    assert window._file_op_active is True, "кнопка «Стоп» не зажглась на время операции"
+    assert window.stop_btn.isEnabled() is True
+    window.secure_worker.wait(30_000)
+    qt_app_process_events(window)
+
+    assert window._file_op_active is False
+    assert window.stop_btn.isEnabled() is False, "после завершения «Стоп» должен гаснуть"
+
+
+def test_cancel_marks_the_running_file_operation(window, tmp_path, monkeypatch):
+    """Нажатие «Стоп» реально прерывает операцию и снимает флаг активности."""
+    from PySide6.QtWidgets import QMessageBox
+
+    files = _make_op_files(tmp_path, 40)
+    results = [
+        SearchResult(Path(path).name, path, "payload", "payload", "txt", "2026")
+        for path in files
+    ]
+    window._on_results_found(results)
+    window.results_model.set_all_checked(True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
+
+    window._start_secure_operation("delete", files)
+    assert window._file_op_active is True
+
+    window._cancel_active_operation()
+    assert window._file_op_active is False
+    assert window.secure_worker._cancelled is True
+    window.secure_worker.wait(30_000)
+    qt_app_process_events(window)
+
+
+def test_stop_button_survives_a_scan_and_a_file_operation_together(window, monkeypatch):
+    """Пока идёт хотя бы одна задача, «Стоп» остаётся доступным.
+
+    Раньше завершение файловой операции безусловно гасило кнопку — и
+    параллельно идущее сканирование оставалось без возможности остановки.
+    """
+    window._mark_scan_active(True)
+    window._mark_file_op_active(True)
+    assert window.stop_btn.isEnabled() is True
+
+    window._mark_file_op_active(False)
+    assert window.stop_btn.isEnabled() is True, "скан ещё идёт — кнопка обязана жить"
+
+    window._mark_scan_active(False)
+    assert window.stop_btn.isEnabled() is False

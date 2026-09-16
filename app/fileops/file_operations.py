@@ -33,6 +33,9 @@ class CopyMapping:
 class OperationResult:
     succeeded: int = 0
     failures: list[str] = field(default_factory=list)
+    # Пользователь прервал операцию: часть файлов осталась необработанной,
+    # и это не ошибка — в отчёте нельзя показывать их как неудачные.
+    cancelled: bool = False
 
 
 def _unique_target(dest_dir: Path, source: Path) -> Path:
@@ -344,6 +347,7 @@ def secure_delete_files(
     total = len(paths)
     for index, path_text in enumerate(paths, start=1):
         if is_cancelled and is_cancelled():
+            result.cancelled = True
             break
         path = Path(path_text).expanduser()
         if on_progress:
@@ -353,7 +357,10 @@ def secure_delete_files(
             overwritten_stat = _overwrite_file(path, passes, expected_stat)
             _unlink_verified(path, overwritten_stat)
             result.succeeded += 1
-        except (OSError, Exception) as exc:
+        except Exception as exc:
+            # Ловим Exception, а не только OSError: непредвиденная ошибка
+            # одного файла не должна уносить с собой весь пакет — остальные
+            # файлы пользователь всё равно просил обработать.
             result.failures.append(f"{path}: {exc}")
     return result
 
@@ -397,6 +404,7 @@ def secure_move_files(
 
     for index, path_text in enumerate(paths, start=1):
         if is_cancelled and is_cancelled():
+            result.cancelled = True
             break
         source = Path(path_text).expanduser()
         target: Path | None = None
@@ -415,7 +423,7 @@ def secure_move_files(
             overwritten_stat = _overwrite_file(source, passes, expected_stat)
             _unlink_verified(source, overwritten_stat)
             result.succeeded += 1
-        except (OSError, Exception) as exc:
+        except Exception as exc:
             result.failures.append(f"{source}: {exc}")
             # Копия при неудаче стирания сохраняется как резерв, но явно
             # сообщается пользователю, что исходный файл остался на месте.

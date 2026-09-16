@@ -114,20 +114,23 @@ class CopyWorker(QThread):
         self.unique_paths = list(unique_paths)
         self.destination = destination
         self._cancelled = False
+        # Устанавливается в run(): обработчик завершения по нему отличает
+        # «скопировано всё» от «пользователь нажал Стоп».
+        self.was_cancelled = False
 
     def cancel(self) -> None:
         self._cancelled = True
 
     def run(self) -> None:
         try:
-            self.finished_ok.emit(
-                copy_found_files(
-                    self.unique_paths,
-                    self.destination,
-                    on_progress=lambda current, total, name: self.progress.emit(current, total, name),
-                    is_cancelled=lambda: self._cancelled,
-                )
+            mappings = copy_found_files(
+                self.unique_paths,
+                self.destination,
+                on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                is_cancelled=lambda: self._cancelled,
             )
+            self.was_cancelled = bool(self._cancelled)
+            self.finished_ok.emit(mappings)
         except Exception as exc:
             self.failed.emit(str(exc))
 

@@ -24,7 +24,6 @@ class _Inflight:
     __slots__ = ("event", "outcome")
 
     def __init__(self):
-        from threading import Event
         self.event = Event()
         self.outcome = None
 
