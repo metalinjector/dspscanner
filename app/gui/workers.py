@@ -107,15 +107,27 @@ class SingleFileTestWorker(QThread):
 class CopyWorker(QThread):
     finished_ok = Signal(list)
     failed = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(self, unique_paths: Sequence[str], destination: str, parent=None):
         super().__init__(parent)
         self.unique_paths = list(unique_paths)
         self.destination = destination
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:
         try:
-            self.finished_ok.emit(copy_found_files(self.unique_paths, self.destination))
+            self.finished_ok.emit(
+                copy_found_files(
+                    self.unique_paths,
+                    self.destination,
+                    on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                    is_cancelled=lambda: self._cancelled,
+                )
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -123,6 +135,7 @@ class CopyWorker(QThread):
 class SecureOpWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(self, mode: str, paths: Sequence[str], destination: str = "", passes: int = 3, parent=None):
         super().__init__(parent)
@@ -130,13 +143,28 @@ class SecureOpWorker(QThread):
         self.paths = list(paths)
         self.destination = destination
         self.passes = passes
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:
         try:
             if self.mode == "delete":
-                result = secure_delete_files(self.paths, self.passes)
+                result = secure_delete_files(
+                    self.paths,
+                    self.passes,
+                    on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                    is_cancelled=lambda: self._cancelled,
+                )
             else:
-                result = secure_move_files(self.paths, self.destination, self.passes)
+                result = secure_move_files(
+                    self.paths,
+                    self.destination,
+                    self.passes,
+                    on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                    is_cancelled=lambda: self._cancelled,
+                )
             self.finished_ok.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))

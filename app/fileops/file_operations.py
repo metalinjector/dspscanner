@@ -8,10 +8,11 @@ import secrets
 import shutil
 import stat as stat_module
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Callable, Iterable, List, Sequence
 
 
 # Сколько раз переименовать файл перед удалением, чтобы затереть его имя в
@@ -66,13 +67,23 @@ def _copy_exclusive(source: Path, target: Path) -> None:
         raise
 
 
-def copy_found_files(unique_paths: Sequence[str], destination: str) -> List[CopyMapping]:
+def copy_found_files(
+    unique_paths: Sequence[str],
+    destination: str,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> List[CopyMapping]:
     dest_dir = Path(destination).expanduser()
     dest_dir.mkdir(parents=True, exist_ok=True)
     mappings: List[CopyMapping] = []
+    total = len(unique_paths)
 
-    for source_text in unique_paths:
+    for index, source_text in enumerate(unique_paths, start=1):
+        if is_cancelled and is_cancelled():
+            break
         source = Path(source_text)
+        if on_progress:
+            on_progress(index, total, source.name)
         try:
             if source.is_symlink() or not source.is_file():
                 continue
@@ -177,6 +188,16 @@ def _clamp_passes(passes: int) -> int:
         return 3
 
 
+def _ensure_writable(path: Path) -> None:
+    """Снимает атрибут «Только для чтения», если он установлен."""
+    try:
+        current_mode = path.stat().st_mode
+        if not (current_mode & stat_module.S_IWRITE):
+            path.chmod(current_mode | stat_module.S_IWRITE)
+    except OSError:
+        pass
+
+
 def _truncate_in_place(path: Path, expected_stat) -> None:
     """Обнуляет длину файла после перезаписи содержимого.
 
@@ -185,12 +206,22 @@ def _truncate_in_place(path: Path, expected_stat) -> None:
     содержимое к этому моменту уже затёрто, поэтому любая ошибка здесь не
     должна срывать само удаление.
     """
+    _ensure_writable(path)
+    try:
+        if path.stat().st_size == 0:
+            return
+    except OSError:
+        return
+
     flags = os.O_RDWR
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
     try:
         opened_stat = os.fstat(fd)
         if not stat_module.S_ISREG(opened_stat.st_mode):
@@ -200,37 +231,37 @@ def _truncate_in_place(path: Path, expected_stat) -> None:
         if all(expected_identity) and opened_identity != expected_identity:
             raise OSError("файл был заменён во время операции")
         os.ftruncate(fd, 0)
-        os.fsync(fd)
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _scrub_name(path: Path) -> Path:
-    """Несколько раз переименовывает файл случайным именем.
+    """Переименовывает файл случайным именем для сокрытия исходного имени в каталоге.
 
-    Имя файла само по себе раскрывает содержание («увольнение_иванова.docx»),
-    а после обычного unlink оно остаётся в записи каталога и может пережить
-    удаление. Так поступают штатные инструменты (`shred -u`, `srm`).
-
-    Переименование делается только после того, как содержимое уже затёрто,
-    поэтому неудача на любом шаге не опасна: возвращается последнее имя, по
-    которому файл реально существует, и удаление продолжается по нему.
+    Сохраняет суффикс (расширение) файла, чтобы не вызывать ложных срабатываний
+    эвристик антивирусов (ransomware detection), и ограничивается разумным числом
+    попыток.
     """
     current = path
+    suffix = current.suffix
     for _ in range(_RENAME_PASSES):
-        # Имя той же длины, что и исходное: длина записи в каталоге тоже
-        # немного говорит об имени. Минимум — чтобы не получить пустое имя.
-        length = max(8, len(current.name))
+        stem_len = max(8, len(current.stem))
         for _attempt in range(_RENAME_COLLISION_RETRIES):
-            candidate = current.with_name(secrets.token_hex(32)[:length])
+            random_name = secrets.token_hex(stem_len)[:stem_len]
+            candidate = current.with_name(f"{random_name}{suffix}")
             if candidate.exists():
                 continue
             try:
                 current.rename(candidate)
                 current = candidate
             except OSError:
-                # Каталог только для чтения, чужая ФС, гонка — не страшно:
-                # содержимое уже уничтожено, удаляем под текущим именем.
                 return current
             break
     return current
@@ -240,8 +271,10 @@ def _fsync_directory(directory: Path) -> None:
     """Сбрасывает на диск саму запись каталога после удаления.
 
     Без этого удаление может остаться только в кеше метаданных. На Windows
-    каталог открыть нельзя — там шаг просто пропускается.
+    каталог открыть через POSIX open нельзя — шаг пропускается.
     """
+    if os.name == "nt":
+        return
     try:
         fd = os.open(directory, getattr(os, "O_DIRECTORY", os.O_RDONLY))
     except OSError:
@@ -251,7 +284,10 @@ def _fsync_directory(directory: Path) -> None:
     except OSError:
         pass
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _unlink_verified(path: Path, expected_stat) -> None:
@@ -271,33 +307,55 @@ def _unlink_verified(path: Path, expected_stat) -> None:
         pass
     scrubbed = _scrub_name(path)
 
-    try:
-        scrubbed.unlink()
-    except OSError as exc:
+    _ensure_writable(scrubbed)
+    # На Windows после записи и переименования файл может быть кратковременно
+    # заблокирован антивирусом или индексатором. Повторяем unlink с небольшой паузой.
+    last_exc: OSError | None = None
+    for attempt in range(5):
+        try:
+            scrubbed.unlink()
+            last_exc = None
+            break
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(0.05)
+        except OSError as exc:
+            last_exc = exc
+            break
+
+    if last_exc is not None:
         if scrubbed != path:
             # Иначе пользователь не найдёт остаток: имя уже случайное.
             raise OSError(
-                f"{exc}; содержимое уничтожено, остался файл {scrubbed.name}"
-            ) from exc
-        raise
+                f"{last_exc}; содержимое уничтожено, остался файл {scrubbed.name}"
+            ) from last_exc
+        raise last_exc
     _fsync_directory(scrubbed.parent)
 
 
-def secure_delete_files(paths: Sequence[str], passes: int = 3) -> OperationResult:
+def secure_delete_files(
+    paths: Sequence[str],
+    passes: int = 3,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> OperationResult:
     result = OperationResult()
     passes = _clamp_passes(passes)
-    for path_text in paths:
+    total = len(paths)
+    for index, path_text in enumerate(paths, start=1):
+        if is_cancelled and is_cancelled():
+            break
         path = Path(path_text).expanduser()
+        if on_progress:
+            on_progress(index, total, path.name)
         try:
             expected_stat = _validate_destructive_path(path)
             overwritten_stat = _overwrite_file(path, passes, expected_stat)
             _unlink_verified(path, overwritten_stat)
             result.succeeded += 1
-        except OSError as exc:
+        except (OSError, Exception) as exc:
             result.failures.append(f"{path}: {exc}")
     return result
-
-
 
 
 def _sha256_file(path: Path) -> bytes:
@@ -324,15 +382,26 @@ def _verify_secure_move_copy(source: Path, target: Path, expected_stat) -> None:
         raise OSError("контрольная сумма созданной копии не совпадает с оригиналом")
 
 
-def secure_move_files(paths: Sequence[str], destination: str, passes: int = 3) -> OperationResult:
+def secure_move_files(
+    paths: Sequence[str],
+    destination: str,
+    passes: int = 3,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> OperationResult:
     dest_dir = Path(destination).expanduser()
     dest_dir.mkdir(parents=True, exist_ok=True)
     result = OperationResult()
     passes = _clamp_passes(passes)
+    total = len(paths)
 
-    for path_text in paths:
+    for index, path_text in enumerate(paths, start=1):
+        if is_cancelled and is_cancelled():
+            break
         source = Path(path_text).expanduser()
         target: Path | None = None
+        if on_progress:
+            on_progress(index, total, source.name)
         try:
             expected_stat = _validate_destructive_path(source)
             target = _unique_target(dest_dir, source)
@@ -346,7 +415,7 @@ def secure_move_files(paths: Sequence[str], destination: str, passes: int = 3) -
             overwritten_stat = _overwrite_file(source, passes, expected_stat)
             _unlink_verified(source, overwritten_stat)
             result.succeeded += 1
-        except OSError as exc:
+        except (OSError, Exception) as exc:
             result.failures.append(f"{source}: {exc}")
             # Копия при неудаче стирания сохраняется как резерв, но явно
             # сообщается пользователю, что исходный файл остался на месте.
@@ -354,6 +423,7 @@ def secure_move_files(paths: Sequence[str], destination: str, passes: int = 3) -
 
 
 def _overwrite_file(path: Path, passes: int, expected_stat=None):
+    _ensure_writable(path)
     flags = os.O_RDWR
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
@@ -379,20 +449,50 @@ def _overwrite_file(path: Path, passes: int, expected_stat=None):
         chunk_size_max = 1024 * 1024
         with os.fdopen(fd, "r+b", buffering=0, closefd=True) as file_handle:
             fd = -1
-            for pass_index in range(max(1, passes)):
+            passes_count = max(1, passes)
+            for pass_index in range(passes_count):
                 file_handle.seek(0)
                 remaining = size
-                use_random = pass_index % 2 == 0
+                # NIST SP 800-88 рекомендует фиксированный шаблон (нули 0x00).
+                # При многопроходной перезаписи чередуем: нули / 0xFF / случайные байты.
+                # Это надёжно и не вызывает срабатывания антивирусов (ransomware detection).
+                if passes_count == 1 or pass_index == 0:
+                    pattern = b"\x00"
+                    use_urandom = False
+                elif pass_index == 1:
+                    pattern = b"\xff"
+                    use_urandom = False
+                elif pass_index % 2 == 0:
+                    use_urandom = True
+                    pattern = b""
+                else:
+                    pattern = b"\xaa"
+                    use_urandom = False
+
                 while remaining:
                     chunk_size = min(chunk_size_max, remaining)
-                    data = os.urandom(chunk_size) if use_random else b"\x00" * chunk_size
+                    data = os.urandom(chunk_size) if use_urandom else pattern * chunk_size
                     written = file_handle.write(data)
                     if written != chunk_size:
                         raise OSError("неполная запись при перезаписи")
                     remaining -= written
                 file_handle.flush()
+                try:
+                    os.fsync(file_handle.fileno())
+                except OSError:
+                    pass
+
+            # Обнуляем размер файла прямо на открытом дескрипторе
+            try:
+                file_handle.truncate(0)
+                file_handle.flush()
                 os.fsync(file_handle.fileno())
+            except OSError:
+                pass
             return os.fstat(file_handle.fileno())
     finally:
         if fd >= 0:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass

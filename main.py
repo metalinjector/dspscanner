@@ -1,11 +1,19 @@
 """DSP Scanner — точка входа GUI и командного интерфейса."""
 from __future__ import annotations
 
+import faulthandler
 import multiprocessing
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Sequence
+
+# Перехват аппаратных сбоев и фатальных сигналов (SIGSEGV, SIGABRT и т.п.)
+try:
+    faulthandler.enable()
+except Exception:
+    pass
 
 # Пакет app доступен независимо от текущей рабочей директории.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,7 +106,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             return
 
+    def thread_excepthook(args: threading.ExceptHookArgs) -> None:
+        text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        logger.critical("Необработанное исключение в потоке %s:\n%s", args.thread.name, text)
+
     sys.excepthook = excepthook
+    threading.excepthook = thread_excepthook
     window = MainWindow(logger=logger, qt_log_handler=qt_log_handler)
     window.show()
     return app.exec()

@@ -1369,13 +1369,14 @@ class MainWindow(QMainWindow):
         self.unreadable_files_btn.setEnabled(False)
         if dialog.selected_action == UnreadableFilesDialog.ACTION_COPY:
             destination = dialog.destination
-            self.error_copy_worker = CopyWorker(paths, destination)
+            self.error_copy_worker = CopyWorker(paths, destination, parent=self)
             self.error_copy_worker.finished_ok.connect(
                 lambda mappings, expected=len(paths), target=destination: (
                     self._on_unreadable_copy_finished(mappings, expected, target)
                 )
             )
             self.error_copy_worker.failed.connect(self._on_unreadable_operation_failed)
+            self.error_copy_worker.progress.connect(self._on_file_op_progress)
             self.status_bar.showMessage("Копирование файлов с ошибками чтения…")
             self.error_copy_worker.start()
             return
@@ -1390,6 +1391,7 @@ class MainWindow(QMainWindow):
             paths,
             dialog.destination,
             passes=load_settings().secure_passes,
+            parent=self,
         )
         self.error_secure_worker.finished_ok.connect(
             lambda result, operation=mode: self._on_unreadable_secure_finished(
@@ -1397,6 +1399,7 @@ class MainWindow(QMainWindow):
             )
         )
         self.error_secure_worker.failed.connect(self._on_unreadable_operation_failed)
+        self.error_secure_worker.progress.connect(self._on_file_op_progress)
         self.status_bar.showMessage(
             "Безопасное перемещение файлов с ошибками чтения…"
             if mode == "move"
@@ -2453,6 +2456,9 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Ошибка копирования", message)
         self._maybe_close_after_workers()
 
+    def _on_file_op_progress(self, current: int, total: int, file_name: str) -> None:
+        self.status_bar.showMessage(f"Обработка файлов ({current}/{total}): {file_name}")
+
     # -- Единый конвейер безопасных операций -------------------------- #
     #
     # Обе вкладки работают по одному сценарию: собрать отмеченные пути,
@@ -2486,11 +2492,13 @@ class MainWindow(QMainWindow):
             paths,
             destination or "",
             passes=load_settings().secure_passes,
+            parent=self,
         )
         self.secure_worker.finished_ok.connect(
             lambda result: self._on_secure_finished(action, result)
         )
         self.secure_worker.failed.connect(self._on_secure_failed)
+        self.secure_worker.progress.connect(self._on_file_op_progress)
         self._set_secure_controls_enabled(False)
         self.status_bar.showMessage(
             "Безопасное перемещение отмеченных файлов…"
@@ -2557,9 +2565,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Не указан путь", "Укажите папку назначения.")
             return
 
-        self.copy_worker = CopyWorker(paths, destination)
+        self.copy_worker = CopyWorker(paths, destination, parent=self)
         self.copy_worker.finished_ok.connect(self._on_copy_finished)
         self.copy_worker.failed.connect(self._on_copy_failed)
+        self.copy_worker.progress.connect(self._on_file_op_progress)
         self._set_secure_controls_enabled(False)
         self.status_bar.showMessage("Копирование отмеченных файлов…")
         self.copy_worker.start()
