@@ -3140,7 +3140,56 @@ class MainWindow(QMainWindow):
     def _maybe_close_after_workers(self) -> None:
         if self._closing_after_scan and not self._workers_running():
             self._closing_after_scan = False
+            # Воркеры убираются ДО закрытия окна и с ожиданием: QThread,
+            # разрушенный при живом потоке, вызывает abort (0xC0000409).
+            self._dispose_finished_workers()
             self.close()
+
+    def _dispose_finished_workers(self, timeout_ms: int = 30_000) -> None:
+        """Дожидается и отпускает воркеры, снимая ссылки на них.
+
+        Кадр «QThread: Destroyed while thread is still running» из Qt — это
+        не предупреждение, а qFatal: поток, разрушенный сборщиком мусора
+        Python или при удалении родителя, валит процесс через ``__fastfail``
+        (код возврата 0xC0000409). Дамп падения показывает, что именно так и
+        падало приложение: abort вызывается из деструктора Qt во время
+        завершения интерпретатора. Поэтому каждый воркер дожидается явно, и
+        только потом снимается ссылка; удаление откладывается через
+        ``deleteLater``, чтобы не разрушать QObject в чужом стеке вызовов.
+        """
+        names = (
+            "scan_worker",
+            "copy_worker",
+            "secure_worker",
+            "error_copy_worker",
+            "error_secure_worker",
+            "email_worker",
+            "single_file_worker",
+        )
+        for name in names:
+            worker = getattr(self, name, None)
+            if worker is None:
+                continue
+            if worker.isRunning() and not worker.wait(timeout_ms):
+                # Живой воркер не разрушаем ни при каких условиях.
+                self.logger.warning(
+                    "Воркер %s не завершился за %.1f с и не будет разрушен",
+                    name,
+                    timeout_ms / 1000,
+                )
+                continue
+            worker.deleteLater()
+            setattr(self, name, None)
+
+    def shutdown_workers(self) -> None:
+        """Дожидается воркеров после выхода из цикла событий.
+
+        Вызывается из ``main()`` после ``app.exec()``: цикл событий уже не
+        работает, обработчики ``finished`` не вызовутся — но дождаться
+        потоков обязательно, иначе завершение интерпретатора разрушит живой
+        QThread и процесс упадёт с 0xC0000409 вместо нормального выхода.
+        """
+        self._dispose_finished_workers(timeout_ms=10_000)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.settings_store.setValue("geometry", self.saveGeometry())
@@ -3157,4 +3206,6 @@ class MainWindow(QMainWindow):
                 )
             event.ignore()
             return
+        # Ни один воркер не работает — отпускаем их до разрушения окна.
+        self._dispose_finished_workers()
         super().closeEvent(event)

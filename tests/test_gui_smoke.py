@@ -1634,3 +1634,60 @@ def test_stop_button_survives_a_scan_and_a_file_operation_together(window, monke
 
     window._mark_scan_active(False)
     assert window.stop_btn.isEnabled() is False
+
+def test_closing_the_window_waits_for_a_running_worker(window, qt_app, tmp_path):
+    """Закрытие окна не разрушает живой воркер: иначе процесс падает с abort.
+
+    Регрессионный тест на реальный вылет 0xC0000409: Qt вызывает qFatal
+    («QThread: Destroyed while thread is still running») из деструктора, когда
+    объект потока умирает раньше самого потока. Здесь воркер запускается и
+    окно закрывается сразу — проверяем, что процесс не падает, поток
+    дожидается, а ссылка на воркер снимается.
+    """
+    import time
+
+    from app.gui.workers import CopyWorker
+
+    files = _make_op_files(tmp_path, 40)
+    destination = tmp_path / "dst_close"
+    worker = CopyWorker(files, str(destination), parent=window)
+    window.copy_worker = worker
+    worker.start()
+    time.sleep(0.05)
+    assert worker.isRunning(), "воркер не успел запуститься"
+
+    # Симулируем выход: то, что делает main() после app.exec().
+    window.shutdown_workers()
+
+    assert worker.isRunning() is False, "живой поток пережил выход — будет abort"
+    assert window.copy_worker is None, "ссылка на воркер не снята"
+
+
+def test_shutdown_workers_is_safe_without_any_worker(window):
+    """Выход без запущенных операций не должен ничего ломать."""
+    window.shutdown_workers()
+    assert window.scan_worker is None
+    assert window.copy_worker is None
+    assert window.secure_worker is None
+
+
+def test_shutdown_workers_keeps_a_stuck_worker_alive(window, monkeypatch):
+    """Зависший воркер не разрушается: abort хуже, чем незакрытый поток."""
+    from PySide6.QtCore import QThread
+
+    class Stuck(QThread):
+        def run(self):
+            while True:
+                import time
+                time.sleep(0.1)
+
+    stuck = Stuck(parent=window)
+    window.single_file_worker = stuck
+    stuck.start()
+    monkeypatch.setattr(QThread, "wait", lambda self, msec=None: False)  # всегда «не дождались»
+
+    window.shutdown_workers()
+
+    assert window.single_file_worker is stuck, "зависший воркер нельзя разрушать"
+    stuck.terminate()
+    stuck.wait(5000)

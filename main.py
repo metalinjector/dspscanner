@@ -167,7 +167,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     threading.excepthook = thread_excepthook
     window = MainWindow(logger=logger, qt_log_handler=qt_log_handler)
     window.show()
-    return app.exec()
+    exit_code = app.exec()
+    # Завершение интерпретатора разрушает оставшиеся объекты Python, и живой
+    # QThread в этот момент валит процесс через abort (0xC0000409). Поэтому
+    # дожидаемся воркеров сразу после выхода из цикла событий.
+    try:
+        window.shutdown_workers()
+    except Exception:
+        logger.exception("Не удалось дождаться фоновых потоков при выходе")
+    return exit_code
 
 
 if __name__ == "__main__":
