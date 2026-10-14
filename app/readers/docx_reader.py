@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import email
+import io
 import logging
 from email.policy import default
 import re
@@ -17,15 +18,17 @@ from app.config import (
     DOCX_MAX_XML_BYTES,
 )
 from app.readers.base import BaseReader, ReaderOutcome
-from app.readers.doc_formats import read_rtf
+from app.readers.doc_formats import read_html, read_rtf
 
 # Дочерний логгер "dspscanner": пишет в тот же файл журнала и вкладку "Журнал"
 # GUI, что и остальное приложение (см. app/logging_utils.py).
 _logger = logging.getLogger("dspscanner.docx_reader")
 
 _WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-_TEXT_TAG = f"{_WORD_NS}t"
-_BREAK_TAGS = {f"{_WORD_NS}p", f"{_WORD_NS}br", f"{_WORD_NS}tab", f"{_WORD_NS}cr"}
+_STRICT_WORD_NS = "{http://purl.oclc.org/ooxml/wordprocessingml/main}"
+_WORD_NAMESPACES = (_WORD_NS, _STRICT_WORD_NS)
+_WORD_TAGS = {f"{ns}{tag}": tag for ns in _WORD_NAMESPACES
+              for tag in ("p", "t", "br", "tab", "cr", "tc", "tr", "noBreakHyphen")}
 _RELEVANT_XML_PREFIXES = (
     "word/document", "word/header", "word/footer", "word/footnotes",
     "word/endnotes", "word/comments",
@@ -89,30 +92,22 @@ class DocxReader(BaseReader):
             # Прямой XML-парсер линейно обходит содержимое архива и не страдает
             # квадратичным пересозданием table.row.cells в python-docx на больших
             # табличных документах. python-docx остаётся совместимым fallback.
-            text = self._read_manual_xml(archive)
+            warnings: list[str] = []
+            text = self._read_manual_xml(archive, warnings)
+            altchunk = self._read_altchunk_parts(archive, warnings)
+            warning = "; ".join(warnings) or None
+            if text and altchunk:
+                return ReaderOutcome(text=f"{text}\n\n{altchunk}",
+                                     method_used="manual-xml+altchunk", warning=warning)
             if text:
-                # Импортированный через altChunk раздел лежит в отдельной
-                # MHTML-части и не виден XML-парсеру. Без склейки содержимое
-                # такого раздела терялось в любом документе, где есть хотя бы
-                # один обычный абзац. namelist() уже в памяти, поэтому для
-                # документов без altChunk проверка ничего не стоит.
-                altchunk = self._read_altchunk_parts(archive)
-                if altchunk and altchunk not in text:
-                    return ReaderOutcome(
-                        text=f"{text}\n\n{altchunk}",
-                        method_used="manual-xml+altchunk",
-                    )
-                return ReaderOutcome(text=text, method_used="manual-xml")
+                return ReaderOutcome(text=text, method_used="manual-xml", warning=warning)
+            if altchunk:
+                return ReaderOutcome(text=altchunk, method_used="altchunk-mht-parser", warning=warning)
 
-        # python-docx и altchunk открывают файл самостоятельно; они остаются
-        # fallback-путями после неудачного основного разбора.
+        # python-docx остаётся резервом; все MHTML-части уже проверены в первом архиве.
         text = self._read_with_python_docx(path)
         if text:
-            return ReaderOutcome(text=text, method_used="python-docx-fallback")
-
-        text = self._read_altchunk(path)
-        if text:
-            return ReaderOutcome(text=text, method_used="altchunk-mht-parser")
+            return ReaderOutcome(text=text, method_used="python-docx-fallback", warning=warning)
 
         return ReaderOutcome(error="Не удалось извлечь текст из DOCX (файл повреждён?)")
 
@@ -156,7 +151,7 @@ class DocxReader(BaseReader):
             return None
 
     @staticmethod
-    def _read_manual_xml(archive: zipfile.ZipFile) -> Optional[str]:
+    def _read_manual_xml(archive: zipfile.ZipFile, warnings: Optional[list[str]] = None) -> Optional[str]:
         try:
             from defusedxml import ElementTree as ET
 
@@ -178,18 +173,26 @@ class DocxReader(BaseReader):
                             name,
                         )
                         continue
-                    root = ET.fromstring(archive.read(name))
+                    parts: List[str] = []
+                    for event, elem in ET.iterparse(io.BytesIO(archive.read(name)), events=("start", "end")):
+                        tag = _WORD_TAGS.get(elem.tag, "")
+                        if event == "start" and tag == "p":
+                            parts.append("\n")
+                        elif event == "end":
+                            if tag == "t" and elem.text:
+                                parts.append(elem.text)
+                            elif tag in {"p", "br", "tab", "cr", "tc", "tr"}:
+                                parts.append("\n")
+                            elif tag == "noBreakHyphen":
+                                parts.append("-")
+                            elem.clear()
                 except Exception as exc:  # noqa: BLE001
                     # Одна повреждённая часть (например, comments.xml) не должна
                     # отменять извлечение текста из остальных исправных частей.
                     _logger.debug("DOCX: часть %s пропущена: %s", name, exc)
+                    if warnings is not None:
+                        warnings.append(f"DOCX прочитан частично: не удалось прочитать {name}")
                     continue
-                parts: List[str] = []
-                for elem in root.iter():
-                    if elem.tag == _TEXT_TAG and elem.text:
-                        parts.append(elem.text)
-                    elif elem.tag in _BREAK_TAGS:
-                        parts.append("\n")
                 text = "".join(parts).strip()
                 if text:
                     document_parts.append(text)
@@ -211,46 +214,36 @@ class DocxReader(BaseReader):
             return None
 
     @staticmethod
-    def _read_altchunk_parts(archive: zipfile.ZipFile) -> Optional[str]:
-        try:
-            names = [
-                name for name in archive.namelist()
-                if name.lower().startswith("word/")
-                and name.lower().endswith((".mht", ".mhtml"))
-            ]
-            if not names:
-                return None
-            info = archive.getinfo(names[0])
-            if info.file_size > DOCX_MAX_SINGLE_ENTRY_BYTES:
-                return None
-            data = archive.read(names[0])
-        except Exception:
-            return None
-
-        try:
-            message = email.message_from_bytes(data, policy=default)
-            parts = []
-            for part in message.walk():
-                if part.is_multipart():
-                    continue
+    def _read_altchunk_parts(archive: zipfile.ZipFile, warnings: Optional[list[str]] = None) -> Optional[str]:
+        # All imported MHTML sections, not just names[0]. Do not deduplicate
+        # equal sections: two real occurrences must remain two search matches.
+        results = []
+        for name in archive.namelist():
+            if not (name.lower().startswith("word/") and name.lower().endswith((".mht", ".mhtml"))):
+                continue
+            try:
+                if archive.getinfo(name).file_size > DOCX_MAX_SINGLE_ENTRY_BYTES:
+                    raise ValueError("MHTML part too large")
+                message = email.message_from_bytes(archive.read(name), policy=default)
+                # multipart/alternative is one body, not duplicate HTML+plain.
+                part = message.get_body(preferencelist=("html", "plain"))
+                if part is None:
+                    part = next((p for p in message.walk() if p.get_content_type() == "application/rtf"), None)
+                if part is None:
+                    raise ValueError("No supported MHTML body")
                 payload = part.get_payload(decode=True)
                 if not payload:
                     continue
-                content_type = part.get_content_type()
-                if content_type == "text/html":
-                    charset = part.get_content_charset() or "utf-8"
-                    html_text = payload.decode(charset, errors="replace")
-                    cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", html_text, flags=re.IGNORECASE)
-                    cleaned = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", cleaned, flags=re.IGNORECASE)
-                    parts.append(re.sub(r"<[^>]+>", " ", cleaned))
-                elif content_type == "text/plain":
-                    charset = part.get_content_charset() or "utf-8"
-                    parts.append(payload.decode(charset, errors="replace"))
-                elif content_type == "application/rtf":
-                    rtf_text = read_rtf(payload)
-                    if rtf_text:
-                        parts.append(rtf_text)
-            result = re.sub(r"\s+", " ", " ".join(parts)).strip()
-            return result if len(result) >= 5 else None
-        except Exception:
-            return None
+                if part.get_content_type() == "text/html":
+                    text = read_html(payload, encoding=part.get_content_charset())
+                elif part.get_content_type() == "application/rtf":
+                    text = read_rtf(payload)
+                else:
+                    text = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                if text and text.strip():
+                    results.append(text.strip())
+            except Exception as exc:  # malformed section must not hide later sections
+                _logger.debug("DOCX: altChunk %s пропущен: %s", name, exc)
+                if warnings is not None:
+                    warnings.append(f"DOCX прочитан частично: не удалось прочитать {name}")
+        return "\n\n".join(results) or None

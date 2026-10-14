@@ -31,7 +31,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0 \
+            tesseract-ocr tesseract-ocr-eng
 
       - name: Установка зависимостей
         run: |
@@ -48,6 +49,25 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest
+
+      - name: Реальный OCR через stdin PGM (Linux)
+        if: runner.os == 'Linux'
+        env:
+          DSP_TEST_TESSERACT: /usr/bin/tesseract
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/test_pdf_reader.py -k real_tesseract
+
+      - name: Fast / Standard / Best — реальные rus и rus+eng (Linux, Python 3.12)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        env:
+          DSP_TEST_TESSERACT: ${{ github.workspace }}/Tesseract-OCR/bin/tesseract
+          DSP_TEST_OCR_MATRIX: "1"
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          mkdir -p Tesseract-OCR/bin
+          cp /usr/bin/tesseract Tesseract-OCR/bin/tesseract
+          python tools/install_tesseract.py
+          python -m pytest tests/test_ocr_integration.py
 
   headless-cli:
     # Отдельно проверяем, что серверный режим действительно живёт без PySide6:

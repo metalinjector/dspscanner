@@ -50,19 +50,24 @@ def _unique_target(dest_dir: Path, source: Path) -> Path:
 
 
 def _copy_exclusive(source: Path, target: Path) -> None:
-    """Копирует без перезаписи существующего файла и удаляет недокопанный файл."""
+    """Копирует без перезаписи и удаляет только свою недокопированную копию."""
     target.parent.mkdir(parents=True, exist_ok=True)
+    created = False
     try:
         with open(source, "rb") as src, open(target, "xb") as dst:
+            created = True
             shutil.copyfileobj(src, dst, length=1024 * 1024)
             dst.flush()
             os.fsync(dst.fileno())
         shutil.copystat(source, target, follow_symlinks=False)
     except Exception:
-        try:
-            target.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # open(..., "xb") мог отказать, потому что имя занято. В этом случае
+        # target принадлежит не нам; прежний cleanup удалял чужой файл.
+        if created:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
 
 

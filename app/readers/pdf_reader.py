@@ -7,7 +7,8 @@ import os
 import re
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Optional
 
@@ -27,9 +28,6 @@ _ocr_lang_done = False
 _ocr_lang_command: Optional[str] = None
 _CID_RE = re.compile(r"\(cid:\d+\)")
 
-if _OCR_LIMIT > 1:
-    os.environ.setdefault("OMP_THREAD_LIMIT", "1")
-
 
 def configure_ocr_limit(limit: int) -> None:
     """Ограничивает параллелизм OCR в текущем процессе.
@@ -41,14 +39,12 @@ def configure_ocr_limit(limit: int) -> None:
     _OCR_LIMIT = max(1, int(limit))
     _OCR_SEMAPHORE = threading.BoundedSemaphore(_OCR_LIMIT)
     _OCR_CHUNK = min(4, _OCR_LIMIT)
-    if _OCR_LIMIT > 1:
-        os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 
 # Градация моделей OCR: имя каталога с traineddata.
 # fast — int8-модели (самые быстрые, точность чуть ниже);
-# medium — стандартные float-модели (баланс);
-# best — float32-модели максимальной точности (самые медленные).
+# medium — стандартный tessdata: integer LSTM + legacy; используем только LSTM;
+# best — float LSTM, ориентированные на точность (обычно медленнее).
 OCR_MODEL_TIERS: dict[str, str] = {
     "fast": "tessdata-fast",
     "medium": "tessdata-medium",
@@ -57,32 +53,39 @@ OCR_MODEL_TIERS: dict[str, str] = {
 _DEFAULT_OCR_TIER = "fast"
 
 
-def _ocr_tessdata_dir(tesseract_bin: str, tier: str) -> Path:
-    """Каталог traineddata для выбранной градации моделей.
+def _ocr_tessdata_dir(tesseract_bin: str, tier: str) -> Optional[Path]:
+    """Выбирает переносимые модели, не ломая системный путь Tesseract.
 
-    Ищет ``tessdata-<tier>`` рядом с исполняемым файлом Tesseract; при
-    отсутствии — ``tessdata``. Позволяет переключать fast/medium/best без
-    переустановки Tesseract, достаточно положить каталоги рядом с exe.
+    None означает: сохранить TESSDATA_PREFIX пользователя либо использовать
+    встроенный путь бинаря (например, /usr/share/tesseract-ocr/5/tessdata).
+    Нельзя подставлять несуществующий /usr/bin/tessdata.
     """
     executable = Path(tesseract_bin).resolve()
     tier_dir_name = OCR_MODEL_TIERS.get(tier, OCR_MODEL_TIERS[_DEFAULT_OCR_TIER])
-    for base in (executable.parent, executable.parent.parent):
-        tier_dir = base / tier_dir_name
-        if (tier_dir / "rus.traineddata").is_file():
-            return tier_dir
-    # Fallback: единый каталог tessdata (как раньше)
-    for base in (executable.parent, executable.parent.parent):
-        fallback = base / "tessdata"
-        if fallback.is_dir():
-            return fallback
-    return executable.parent / "tessdata"
+    directories = [
+        base / name
+        for name in (tier_dir_name, "tessdata")
+        for base in (executable.parent, executable.parent.parent)
+    ]
+    # Оба поддерживаемых режима запрашивают русский (rus либо rus+eng).
+    # English-only fast не должен затенять рабочий русский fallback.
+    # При отсутствии rus всё же допускаем установку только с eng.
+    for language in ("rus", "eng"):
+        for directory in directories:
+            if (directory / f"{language}.traineddata").is_file():
+                return directory
+    return None
 
 
 def _tesseract_environment(tesseract_bin: str, tier: str = _DEFAULT_OCR_TIER) -> dict[str, str]:
-    """Формирует окружение для системной и переносимой копии Tesseract."""
+    """Окружение только дочернего OCR: без изменения глобального os.environ."""
     env = os.environ.copy()
-    # TESSDATA_PREFIX указывает на каталог выбранной градации моделей.
-    env["TESSDATA_PREFIX"] = str(_ocr_tessdata_dir(tesseract_bin, tier))
+    directory = _ocr_tessdata_dir(tesseract_bin, tier)
+    if directory is not None:
+        env["TESSDATA_PREFIX"] = str(directory)
+    # Параллелизм уже организован на уровне страниц/файлов. В том числе при
+    # одном OCR-слоте внутри каждого из нескольких изолированных PDF-ридеров.
+    env.setdefault("OMP_THREAD_LIMIT", "1")
     return env
 
 
@@ -115,7 +118,10 @@ def _resolve_ocr_lang(
 ) -> Optional[str]:
     """Определяет доступные языки OCR с учётом пользовательской настройки."""
     global _ocr_lang_resolved, _ocr_lang_done, _ocr_lang_command
-    command = str(Path(tesseract_bin)) + (":rus" if russian_only else ":full") + f":{tier}"
+    command = (
+        str(Path(tesseract_bin).resolve()) + (":rus" if russian_only else ":full")
+        + f":{tier}:" + _tesseract_environment(tesseract_bin, tier).get("TESSDATA_PREFIX", "")
+    )
     with _ocr_lang_lock:
         if _ocr_lang_done and _ocr_lang_command == command:
             return _ocr_lang_resolved
@@ -124,11 +130,13 @@ def _resolve_ocr_lang(
         _ocr_lang_command = command
         try:
             completed = _run_tesseract(
-                Path(tesseract_bin),
+                str(tesseract_bin),
                 ["--list-langs"],
                 timeout=15,
                 tier=tier,
             )
+            if completed.returncode != 0:
+                raise RuntimeError(completed.stderr.decode("utf-8", errors="replace").strip())
             output = completed.stdout.decode("utf-8", errors="replace")
             available = {
                 line.strip()
@@ -136,8 +144,9 @@ def _resolve_ocr_lang(
                 if line.strip() and not line.lower().startswith("list of available languages")
             }
             # Если включён режим "только русский" - используем rus, иначе rus+eng
-            if russian_only and "rus" in available:
-                _ocr_lang_resolved = "rus"
+            if russian_only:
+                # Строгий выбор: отсутствие rus не разрешает подменять язык на eng.
+                _ocr_lang_resolved = "rus" if "rus" in available else None
             elif {"rus", "eng"}.issubset(available):
                 _ocr_lang_resolved = "rus+eng"
             elif "rus" in available:
@@ -150,7 +159,7 @@ def _resolve_ocr_lang(
                 ", ".join(sorted(available)) or "ничего",
                 russian_only,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             logger.debug("Не удалось получить список языков Tesseract: %s", exc)
         _ocr_lang_done = True
         return _ocr_lang_resolved
@@ -166,6 +175,24 @@ def _safe_ocr_dpi(page) -> int:
         return max(1, min(_OCR_TARGET_DPI, max_dpi))
     except (AttributeError, TypeError, ValueError, OverflowError):
         return _OCR_TARGET_DPI
+
+
+def _render_ocr_page(document, page_index: int, target_dpi: int) -> tuple[bytes, int]:
+    """Вызывается только в потоке-владельце document, не в OCR executor.
+
+    PGM (серый PNM) не требует PNG-сжатия и поддерживается Leptonica.
+    DPI передаём отдельно: в отличие от PNG, PGM не хранит разрешение.
+    """
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+
+    page = document[page_index]
+    dpi = min(target_dpi, _safe_ocr_dpi(page))
+    pixmap = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False)
+    return pixmap.tobytes("ppm"), dpi
+
 
 def _looks_garbled(page_text: str) -> bool:
     sample = page_text[:4000]
@@ -187,7 +214,10 @@ class PdfReader(BaseReader):
         import errno
 
         try:
-            import fitz
+            try:
+                import pymupdf as fitz
+            except ImportError:
+                import fitz
         except ImportError:
             return ReaderOutcome(error="Библиотека PyMuPDF (fitz) не установлена")
 
@@ -272,118 +302,117 @@ class PdfReader(BaseReader):
             _, detected = autodetect_external_programs()
             if detected:
                 tesseract_bin = detected
-        if not tesseract_bin:
+        if not tesseract_bin or not Path(tesseract_bin).is_file():
             return {}, False, "Исполняемый файл Tesseract не найден в системе"
 
-        # Tesseract запускается напрямую через CLI. Поэтому переносимой папки
-        # Tesseract-OCR достаточно: отдельные Python-пакеты pytesseract и Pillow
-        # больше не являются обязательными и не могут блокировать OCR.
+        started = time.perf_counter()
         tier = getattr(settings, "ocr_model_tier", _DEFAULT_OCR_TIER) or _DEFAULT_OCR_TIER
+        directory = _ocr_tessdata_dir(tesseract_bin, tier)
+        model_source = str(directory or os.environ.get("TESSDATA_PREFIX") or "системный путь Tesseract")
+        warnings: list[str] = []
+        if directory is None or directory.name != OCR_MODEL_TIERS.get(tier):
+            warnings.append(
+                f"Не выбран каталог {OCR_MODEL_TIERS.get(tier, tier)} с подходящими моделями; "
+                f"используются модели: {model_source}. Градация {tier} не подтверждена."
+            )
         language = _resolve_ocr_lang(
             tesseract_bin, russian_only=settings.russian_only, tier=tier,
         )
+        if language is None:
+            # Повтор на другом DPI не исправит отсутствие моделей/бинаря.
+            warnings.append(
+                "Принудительный OCR только на русском: модель rus недоступна; "
+                "установите rus.traineddata. Переход на eng запрещён."
+                if settings.russian_only else
+                "Tesseract: не удалось найти доступные модели rus/eng; проверьте tessdata"
+            )
+            return {}, False, "; ".join(warnings)
+        requested_language = "rus" if settings.russian_only else "rus+eng"
+        if language != requested_language:
+            warnings.append(f"Запрошен язык OCR {requested_language}, доступен только {language}")
         page_timeout = max(5, min(settings.per_file_timeout, 120))
 
-        def ocr_png(png_bytes: bytes) -> str:
+        def ocr_image(image_bytes: bytes, dpi: int) -> tuple[str, float]:
             with _OCR_SEMAPHORE:
-                # Каскад зависит от режима russian_only: rus или rus+eng
-                if language == "rus":
-                    cascade = ("rus",)
-                else:
-                    cascade = (language,) if language else ("rus+eng", "rus", "eng")
-                errors: list[str] = []
-                for lang in cascade:
-                    try:
-                        completed = _run_tesseract(
-                            tesseract_bin,
-                            ["stdin", "stdout", "-l", lang, "--psm", "3"],
-                            input_bytes=png_bytes,
-                            timeout=page_timeout,
-                            tier=tier,
-                        )
-                    except subprocess.TimeoutExpired:
-                        errors.append(f"{lang}: превышен таймаут {page_timeout} с")
-                        continue
-                    except OSError as exc:
-                        errors.append(f"{lang}: не удалось запустить Tesseract: {exc}")
-                        continue
-
-                    stdout = completed.stdout.decode("utf-8", errors="replace")
-                    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-                    if completed.returncode == 0:
-                        return stdout
-                    details = stderr or f"код завершения {completed.returncode}"
-                    errors.append(f"{lang}: {details}")
-                raise RuntimeError("Ошибка OCR: " + "; ".join(errors))
+                ocr_started = time.perf_counter()
+                try:
+                    completed = _run_tesseract(
+                        tesseract_bin,
+                        ["stdin", "stdout", "-l", language, "--oem", "1", "--psm", "3", "--dpi", str(dpi)],
+                        input_bytes=image_bytes,
+                        timeout=page_timeout,
+                        tier=tier,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(f"превышен таймаут OCR {page_timeout} с") from exc
+                if completed.returncode != 0:
+                    details = completed.stderr.decode("utf-8", errors="replace").strip()
+                    raise RuntimeError(details or f"код завершения {completed.returncode}")
+                return completed.stdout.decode("utf-8", errors="replace"), time.perf_counter() - ocr_started
 
         page_texts: dict[int, str] = {}
-        failures: list[str] = []
+        failures: dict[int, str] = {}
         workers = min(_OCR_CHUNK, _OCR_LIMIT, max(1, len(page_indices)))
+        render_seconds = ocr_seconds = 0.0
+        attempts = 0
 
-        # Двухпроходный адаптивный OCR:
-        # Пасс 1: все страницы на 150 DPI (быстро)
-        # Пасс 2: страницы с малым текстом на 250 DPI (точно)
-        # Экономия: хорошие сканы не тратят время на 250 DPI.
-        # Текст пасса 1 сохраняется и НЕ перезаписывается, если пасс 2 не лучше.
-        def ocr_page(page_index: int, target_dpi: int) -> str:
-            try:
-                page = document[page_index]
-                actual_dpi = min(target_dpi, _safe_ocr_dpi(page))
-                pixmap = page.get_pixmap(dpi=actual_dpi, alpha=False)
-                png_bytes = pixmap.tobytes("png")
-                return ocr_png(png_bytes)
-            except Exception as exc:
-                logger.debug(
-                    "Сбой OCR на странице %d файла %s (DPI=%d): %s",
-                    page_index + 1, doc_name, target_dpi, exc,
-                )
-                return ""
-
-        # Пасс 1: 150 DPI для всех страниц
-        pass1_texts: dict[int, str] = {}
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsp-ocr-p1") as pool:
-            for chunk_start in range(0, len(page_indices), _OCR_CHUNK):
-                chunk = page_indices[chunk_start:chunk_start + _OCR_CHUNK]
-                futures = {pool.submit(ocr_page, idx, 150): idx for idx in chunk}
-                for future in as_completed(futures):
-                    page_index = futures[future]
+        def run_pass(pool, indices: list[int], dpi: int) -> None:
+            nonlocal render_seconds, ocr_seconds, attempts
+            pending = {}
+            remaining = iter(indices)
+            exhausted = False
+            while pending or not exhausted:
+                # Скользящее окно: не более workers изображений в полёте.
+                # Освободился любой слот — сразу рендерим следующую страницу,
+                # не ждём самую медленную страницу старой пачки.
+                while len(pending) < workers and not exhausted:
                     try:
-                        text = future.result()
-                        if text.strip():
-                            pass1_texts[page_index] = text
+                        page_index = next(remaining)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    render_started = time.perf_counter()
+                    try:
+                        image_bytes, actual_dpi = _render_ocr_page(document, page_index, dpi)
                     except Exception as exc:
-                        failures.append(f"стр. {page_index + 1} (пасс 1): {exc}")
+                        failures[page_index] = f"рендер: {exc}"
+                        continue
+                    finally:
+                        render_seconds += time.perf_counter() - render_started
+                    attempts += 1
+                    pending[pool.submit(ocr_image, image_bytes, actual_dpi)] = page_index
+                    del image_bytes
+                if not pending:
+                    continue
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    page_index = pending.pop(future)
+                    try:
+                        text, elapsed = future.result()
+                        ocr_seconds += elapsed
+                        if len(text.strip()) > len(page_texts.get(page_index, "").strip()):
+                            page_texts[page_index] = text
+                    except Exception as exc:
+                        failures[page_index] = str(exc)
 
-        # Пасс 2: 250 DPI только для страниц с малым текстом на 150 DPI
-        retry_pages = [
-            idx for idx in page_indices
-            if len(pass1_texts.get(idx, "").strip()) < 30
-        ]
-        if retry_pages:
-            logger.debug(
-                "OCR файла %s: пасс 2 (250 DPI) для %d из %d страниц",
-                doc_name, len(retry_pages), len(page_indices),
-            )
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsp-ocr-p2") as pool:
-                for chunk_start in range(0, len(retry_pages), _OCR_CHUNK):
-                    chunk = retry_pages[chunk_start:chunk_start + _OCR_CHUNK]
-                    futures = {pool.submit(ocr_page, idx, 250): idx for idx in chunk}
-                    for future in as_completed(futures):
-                        page_index = futures[future]
-                        try:
-                            text = future.result()
-                            # Используем пасс 2 только если он дал больше текста
-                            if len(text.strip()) > len(pass1_texts.get(page_index, "").strip()):
-                                pass1_texts[page_index] = text
-                        except Exception as exc:
-                            failures.append(f"стр. {page_index + 1} (пасс 2): {exc}")
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dsp-ocr") as pool:
+            run_pass(pool, page_indices, 150)
+            # Короткий успешно распознанный текст — повод повысить DPI.
+            # Ошибка процесса/таймаут — не повод повторять дорогой вызов.
+            retry_pages = [
+                idx for idx in page_indices
+                if idx not in failures and len(page_texts.get(idx, "").strip()) < 30
+            ]
+            run_pass(pool, retry_pages, 250)
 
-        page_texts = pass1_texts
-
-        warning = None
         if failures:
-            shown = "; ".join(failures[:3])
+            shown = "; ".join(f"стр. {idx + 1}: {error}" for idx, error in sorted(failures.items())[:3])
             suffix = f"; ещё ошибок: {len(failures) - 3}" if len(failures) > 3 else ""
-            warning = f"OCR обработал не все страницы: {shown}{suffix}"
-        return page_texts, bool(page_texts), warning
-
+            warnings.append(f"OCR обработал не все страницы: {shown}{suffix}")
+        logger.info(
+            "OCR %s: tier=%s models=%s lang=%s workers=%d pages=%d retries=%d "
+            "attempts=%d failures=%d render=%.3fs ocr_success_sum=%.3fs wall=%.3fs",
+            doc_name, tier, model_source, language, workers, len(page_indices), len(retry_pages),
+            attempts, len(failures), render_seconds, ocr_seconds, time.perf_counter() - started,
+        )
+        return page_texts, bool(page_texts), "; ".join(warnings) or None

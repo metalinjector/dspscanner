@@ -104,6 +104,11 @@ def _parser() -> argparse.ArgumentParser:
     reading.add_argument("--timeout", type=int, help="таймаут чтения одного файла, секунд")
     reading.add_argument("--libreoffice", metavar="FILE", help="путь к soffice/LibreOffice для этого запуска")
     reading.add_argument("--tesseract", metavar="FILE", help="путь к tesseract для этого запуска")
+    reading.add_argument("--ocr-model-tier", choices=("fast", "medium", "best"), help="градация моделей Tesseract")
+    reading.add_argument(
+        "--russian-only", action=argparse.BooleanOptionalAction, default=None,
+        help="принудительный OCR только rus, без fallback на eng; не фильтрует DOC/DOCX/TXT. --no-russian-only: rus+eng",
+    )
 
     output = parser.add_argument_group("Отчёт")
     output.add_argument("--format", choices=("xlsx", "csv", "md"), default="xlsx", help="формат локального отчёта")
@@ -301,6 +306,12 @@ def _apply_runtime_application_settings(args: argparse.Namespace, config: Mappin
         config_ts = None
 
     overrides = {
+        "DSP_SCANNER_OCR_MODEL_TIER": (
+            args.ocr_model_tier if args.ocr_model_tier is not None else application.get("ocr_model_tier")
+        ),
+        "DSP_SCANNER_RUSSIAN_ONLY": (
+            args.russian_only if args.russian_only is not None else application.get("russian_only")
+        ),
         "DSP_SCANNER_LIBREOFFICE_PATH": args.libreoffice if args.libreoffice is not None else config_lo,
         "DSP_SCANNER_TESSERACT_PATH": args.tesseract if args.tesseract is not None else config_ts,
         "DSP_SCANNER_PER_FILE_TIMEOUT": args.timeout if args.timeout is not None else application.get("per_file_timeout"),

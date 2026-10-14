@@ -1,0 +1,77 @@
+{
+  "scope": "Smoke checks on external Apache POI binary DOC fixtures, not independent complete-text accuracy ground truth. Source macros are never executed. Downloaded fixture files are not bundled.",
+  "fixtures": [
+    {
+      "source": "Apache POI test-data/document/simple.doc",
+      "url": "https://api.github.com/repos/apache/poi/git/blobs/ac0384ac25269d12d778a0d65ce48e74e0541462",
+      "git_blob_sha1": "ac0384ac25269d12d778a0d65ce48e74e0541462",
+      "bytes": 19456,
+      "sha256": "4876e828e62d490fa188c7c4e47013e2e0dfdf02f5903dfd374bc0d2b2049ca1",
+      "method": "ole2-piece-table",
+      "characters": 47,
+      "text_sha256": "a727b36ed55790b7e8a710b16156a1243159a8767e846f8c87b7e80f7b03f218",
+      "warning": null,
+      "error": null
+    },
+    {
+      "source": "Apache POI test-data/document/simple-table.doc",
+      "url": "https://api.github.com/repos/apache/poi/git/blobs/6453e45b4cb425bffef7a48f8bf961a1379924d2",
+      "git_blob_sha1": "6453e45b4cb425bffef7a48f8bf961a1379924d2",
+      "bytes": 19456,
+      "sha256": "67d7fe8e0555c16516354498a5935f24eeef90beb5efbf526f93a1d6c734da43",
+      "method": "ole2-piece-table",
+      "characters": 239,
+      "text_sha256": "a24303dfe4a462502c83f12b8d76b425ad5d93655dfb738d6d19d292aa1409a8",
+      "warning": null,
+      "error": null
+    },
+    {
+      "source": "Apache POI test-data/document/SimpleHeadThreeColFoot.doc",
+      "url": "https://api.github.com/repos/apache/poi/git/blobs/2f8daec639b3547fcabc6f8714fe9e7557e9bfbd",
+      "git_blob_sha1": "2f8daec639b3547fcabc6f8714fe9e7557e9bfbd",
+      "bytes": 27136,
+      "sha256": "de15f6088703ef0730ee715b90dd23a5126011f4cf87900f31d91ea09927244d",
+      "method": "ole2-piece-table",
+      "characters": 298,
+      "text_sha256": "0a90afa068cf5c1bfb731c8607b7da8acd6d7374e7cb0d9e322171539e14bb68",
+      "warning": null,
+      "error": null
+    },
+    {
+      "source": "Apache POI test-data/document/o_kurs.doc",
+      "url": "https://api.github.com/repos/apache/poi/git/blobs/caab02ae9cb6650e501d25afcee28e4a8b9885a0",
+      "git_blob_sha1": "caab02ae9cb6650e501d25afcee28e4a8b9885a0",
+      "bytes": 202240,
+      "sha256": "fd87d25008e5daad8ede2e17976250b1f2dd519102f32135af0a29cbf0789685",
+      "method": "ole2-piece-table",
+      "characters": 5703,
+      "text_sha256": "980ab1fda22e88e12a4e55f3352b866a7ffa21818638987cb57d2254b59c8871",
+      "warning": null,
+      "error": null
+    },
+    {
+      "source": "Apache POI test-data/document/HeaderFooterUnicode.doc",
+      "url": "https://api.github.com/repos/apache/poi/git/blobs/1b517f6a2e08e4584351708a950ea1234bed7b50",
+      "git_blob_sha1": "1b517f6a2e08e4584351708a950ea1234bed7b50",
+      "bytes": 28672,
+      "sha256": "8bd7fc9552bccb7b71a0dc34ffd801e7d3547d1317fd75d0c35fca3572f6fa4b",
+      "method": "ole2-piece-table",
+      "characters": 506,
+      "text_sha256": "0c6e2161c4190f2163d38752adfbd248bda6fa772b8571bbccf9c465e0ab916e",
+      "warning": null,
+      "error": null
+    },
+    {
+      "source": "Apache POI test-data/document/PasswordProtected.doc",
+      "url": "https://api.github.com/repos/apache/poi/git/blobs/0d6c1690636e91f877a889c0a62d82fd689354c8",
+      "git_blob_sha1": "0d6c1690636e91f877a889c0a62d82fd689354c8",
+      "bytes": 19968,
+      "sha256": "863d2216a6f5bb4cec0ea4131a05ae0822dbce347e2940155ef638c6d64935fe",
+      "method": "ole2-piece-table",
+      "characters": 0,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warning": null,
+      "error": "Зашифрованный DOC: требуется пароль"
+    }
+  ]
+}

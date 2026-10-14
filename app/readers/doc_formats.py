@@ -33,7 +33,7 @@ def detect_format(data: bytes) -> str:
     if head[:4] == ZIP_SIGNATURE:
         return "ZIP"
 
-    sniff = data[:512].lstrip()
+    sniff = data[:512].removeprefix(b"\xef\xbb\xbf").lstrip()
     low = sniff[:200].lower()
     if sniff.startswith(b"{\\rtf"):
         return "RTF"
@@ -54,12 +54,15 @@ def read_rtf(data: bytes) -> Optional[str]:
     except ImportError:
         return _read_rtf_fallback(data)
 
-    for enc in ("cp1251", "utf-8", "latin-1"):
+    codepage = re.search(rb"\\ansicpg(\d+)", data[:2000])
+    declared = f"cp{codepage.group(1).decode('ascii')}" if codepage else None
+    encodings = ([declared] if declared else []) + ["utf-8-sig", "cp1251", "latin-1"]
+    for enc in encodings:
         try:
-            raw = data.decode(enc, errors="ignore")
+            raw = data.decode(enc).lstrip("\ufeff")
             text = rtf_to_text(raw)
             text = text.strip()
-            if len(text) >= 5:
+            if text:
                 return text
         except Exception:
             continue
@@ -82,17 +85,20 @@ def _read_rtf_fallback(data: bytes) -> Optional[str]:
 # HTML
 # --------------------------------------------------------------------------- #
 
-def read_html(data: bytes) -> Optional[str]:
-    encoding = "utf-8"
+def read_html(data: bytes, encoding: Optional[str] = None) -> Optional[str]:
+    declared_encoding = encoding
+    encoding = encoding or "utf-8"
     match = re.search(rb'charset=["\']?([\w-]+)', data[:2000], re.IGNORECASE)
-    if match:
+    if match and declared_encoding is None:
         try:
             encoding = match.group(1).decode("ascii")
         except Exception:
             encoding = "utf-8"
 
     try:
-        html_text = data.decode(encoding, errors="replace")
+        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            encoding = "utf-16"
+        html_text = data.decode(encoding)
     except (LookupError, UnicodeDecodeError):
         html_text = data.decode("cp1251", errors="replace")
 
@@ -101,13 +107,18 @@ def read_html(data: bytes) -> Optional[str]:
         soup = BeautifulSoup(html_text, "html.parser")
         for tag in soup(["script", "style"]):
             tag.decompose()
-        text = soup.get_text(separator="\n")
+        # Inline formatting can split a WORD into runs; only block boundaries
+        # introduce whitespace. HTML entities are decoded by BeautifulSoup.
+        for tag in soup.find_all(["br", "p", "div", "li", "tr", "td", "th", "h1", "h2", "h3", "h4"]):
+            tag.insert_before("\n")
+            tag.insert_after("\n")
+        text = soup.get_text(separator="")
     except ImportError:
         text = re.sub(r"<[^>]+>", " ", html_text)
 
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text if len(text) >= 5 else None
+    return text or None
 
 
 # --------------------------------------------------------------------------- #
@@ -116,19 +127,21 @@ def read_html(data: bytes) -> Optional[str]:
 
 def read_word_xml(data: bytes) -> Optional[str]:
     try:
-        text_bytes = data
-        root = ET.fromstring(text_bytes)
         parts = []
-        for elem in root.iter():
-            if elem.tag.endswith("}t") or elem.tag == "t":
-                if elem.text:
-                    parts.append(elem.text)
-            elif elem.tag.endswith("}p") or elem.tag == "p":
+        for event, elem in ET.iterparse(io.BytesIO(data), events=("start", "end")):
+            tag = elem.tag.rsplit("}", 1)[-1]
+            if event == "start" and tag == "p":
                 parts.append("\n")
+            elif event == "end":
+                if tag == "t" and elem.text:
+                    parts.append(elem.text)
+                elif tag in {"p", "tab", "br", "cr", "tc", "tr"}:
+                    parts.append("\n")
+                elem.clear()
         result = "".join(parts)
         result = re.sub(r"[ \t]+", " ", result)
         result = re.sub(r"\n{3,}", "\n\n", result).strip()
-        if len(result) >= 5:
+        if result:
             return result
     except ET.ParseError:
         pass

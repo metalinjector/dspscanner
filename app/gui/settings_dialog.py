@@ -111,20 +111,27 @@ class SettingsDialog(QDialog):
 
         # Чекбокс: Только русский текст
         self.russian_only = QCheckBox(
-            "Искать только русский текст (быстрее, без английского)"
+            "OCR: принудительно только русский (rus)"
         )
         self.russian_only.setChecked(s.russian_only)
         self.russian_only.setToolTip(
-            "Если включено, для OCR используется модель rus (int8 fast).\n"
-            "Это ускоряет обработку на 20-30% и снижает потребление памяти.\n"
-            "Выключите, если в документах много английского текста."
+            "Для сканированных PDF используется только модель rus, без перехода на eng.\n"
+            "Обычно быстрее rus+eng, но английские слова могут быть пропущены.\n"
+            "Не фильтрует текст DOC/DOCX/TXT и PDF с текстовым слоем.\n"
+            "При отсутствии rus.traineddata программа сообщает о невозможности OCR."
         )
         ext_layout.addRow(self.russian_only)
+        language_hint = QLabel(
+            "Только для OCR сканированных PDF. Отключите для русского и английского.\n"
+            "Обычные DOC/DOCX/TXT читаются без OCR; их текст не фильтруется."
+        )
+        language_hint.setWordWrap(True)
+        ext_layout.addRow(language_hint)
 
         # Выбор градации моделей OCR
         self.ocr_model_tier = QComboBox()
-        self.ocr_model_tier.addItem("Быстрая (int8, +30% скорость)", "fast")
-        self.ocr_model_tier.addItem("Средняя (баланс скорость/точность)", "medium")
+        self.ocr_model_tier.addItem("Быстрая (int8, tessdata-fast)", "fast")
+        self.ocr_model_tier.addItem("Стандартная (tessdata, LSTM)", "medium")
         self.ocr_model_tier.addItem("Максимальная точность (медленно)", "best")
         tier_index = {"fast": 0, "medium": 1, "best": 2}.get(
             getattr(s, "ocr_model_tier", "fast"), 0
@@ -133,9 +140,10 @@ class SettingsDialog(QDialog):
         self.ocr_model_tier.setToolTip(
             "Градация моделей Tesseract (каталоги tessdata-fast/medium/best\n"
             "рядом с tesseract.exe):\n"
-            "• Быстрая — int8-модели: +30% скорости, точность чуть ниже;\n"
-            "• Средняя — стандартные модели: баланс;\n"
-            "• Максимальная — самые точные модели, работают медленнее."
+            "• Быстрая — int8-модели; скорость зависит от документов;\n"
+            "• Стандартная — integer LSTM из tessdata;\n"
+            "• Максимальная — float LSTM, обычно медленнее.\n"
+            "Без выбранного каталога используются доступные модели с предупреждением."
         )
         ext_layout.addRow("Модель OCR:", self.ocr_model_tier)
 

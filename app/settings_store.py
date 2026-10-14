@@ -58,7 +58,7 @@ class AppSettings:
     max_matches_per_word: int = 50
     secure_passes: int = 3
     reset_stats_on_start: bool = True
-    russian_only: bool = True  # Искать только русский текст (быстрее, чем rus+eng)
+    russian_only: bool = True  # Только OCR: строго rus, без fallback на eng; не фильтр текста
     ocr_model_tier: str = "fast"  # Градация моделей OCR: fast / medium / best
 
     def sanitized(self) -> "AppSettings":
@@ -68,6 +68,16 @@ class AppSettings:
             except (TypeError, ValueError, OverflowError):
                 return default
             return min(high, max(low, parsed))
+
+        def _bool(value, default: bool) -> bool:
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"true", "1", "yes", "on"}:
+                    return True
+                if normalized in {"false", "0", "no", "off"}:
+                    return False
+                return default
+            return bool(value) if value is not None else default
 
         def _path(value) -> Optional[str]:
             if value is None:
@@ -89,8 +99,8 @@ class AppSettings:
             per_file_timeout=_int(self.per_file_timeout, 60, 10, 600),
             max_matches_per_word=_int(self.max_matches_per_word, 50, 1, 500),
             secure_passes=_int(self.secure_passes, 3, 1, 7),
-            reset_stats_on_start=bool(self.reset_stats_on_start),
-            russian_only=bool(self.russian_only),
+            reset_stats_on_start=_bool(self.reset_stats_on_start, True),
+            russian_only=_bool(self.russian_only, True),
             ocr_model_tier=_tier(self.ocr_model_tier),
         )
 

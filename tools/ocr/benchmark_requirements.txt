@@ -1,0 +1,36 @@
+# Optional research environment, Linux / Python 3.11, 2026-10-14.
+# Not production application requirements; install in a separate venv.
+certifi==2026.7.22
+charset-normalizer==3.5.2
+cmake==3.31.10
+colorlog==6.12.0
+flatbuffers==25.12.19
+idna==3.20
+iniconfig==2.3.1
+ml_dtypes==0.6.0
+numpy==2.4.6
+omegaconf==2.4.0
+onnx==1.23.2
+onnxruntime==1.31.0
+opencv-python-headless==5.0.0.93
+openvino==2026.4.1
+openvino-telemetry==2025.2.0
+packaging==26.3
+pillow==12.3.0
+pluggy==1.6.0
+protobuf==7.36.2
+psutil==7.2.2
+pyclipper==1.4.0
+Pygments==2.21.0
+pymupdf==1.28.2
+pytest==9.1.1
+PyYAML==6.0.3
+RapidFuzz==3.14.6
+rapidocr==3.10.0
+requests==2.34.2
+ruff==0.17.0
+shapely==2.2.0
+six==1.17.0
+tqdm==4.70.1
+typing_extensions==4.16.0
+urllib3==2.8.0

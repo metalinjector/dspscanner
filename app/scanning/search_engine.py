@@ -104,7 +104,7 @@ def _literal_key(word: str, case_sensitive: bool, whole_word: bool) -> str | Non
     """
     if "*" in word or any(char.isspace() for char in word):
         return None
-    key = word if case_sensitive else word.casefold().replace("ё", "е")
+    key = word if case_sensitive else word.casefold().replace("ё", "е").replace("ı", "i")
     if len(key) != len(word):
         return None
     if whole_word and (not _is_word_char(word[0]) or not _is_word_char(word[-1])):
@@ -161,7 +161,8 @@ def _find_aho_positions(
     whole_word: bool,
     max_matches_per_word: int,
 ) -> list[list[tuple[int, int]]]:
-    normalized = text if case_sensitive else text.casefold().replace("ё", "е")
+    # Python re.IGNORECASE also equates dotless ı with I/i. Keep both paths equal.
+    normalized = text if case_sensitive else text.casefold().replace("ё", "е").replace("ı", "i")
     # Некоторые Unicode-символы (например, ß) меняют длину при casefold().
     # В таком случае позиции уже не совпадают с исходной строкой — используем regex.
     if len(normalized) != len(text):
@@ -186,6 +187,10 @@ def _find_aho_positions(
             if len(bucket) >= max_matches_per_word:
                 continue
             start = end - automaton.lengths[pattern_index] + 1
+            # re.finditer не возвращает перекрывающиеся вхождения одного
+            # термина. Число совпадений не должно зависеть от порога Aho (32).
+            if bucket and start < bucket[-1][1]:
+                continue
             if whole_word:
                 if start > 0 and _is_word_char(text[start - 1]):
                     continue

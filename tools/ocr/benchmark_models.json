@@ -1,0 +1,22 @@
+{
+  "upstream_registry": "https://github.com/RapidAI/RapidOCR/blob/v3.10.0/python/rapidocr/default_models.yaml",
+  "note": "GitHub mirrors are used because ModelScope/HuggingFace are not reachable in the benchmark sandbox. Every ONNX file must match the SHA-256 in RapidOCR v3.10.0 before use. No mirror Python code is executed.",
+  "models": {
+    "ch_PP-OCRv5_det_mobile.onnx": {
+      "url": "https://api.github.com/repos/403323726/PP-OCRv5/contents/det/ch_PP-OCRv5_det_mobile.onnx?ref=376ddfd95322d6fcf41b489abc3780ff53b235ee",
+      "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae"
+    },
+    "cyrillic_PP-OCRv5_rec_mobile.onnx": {
+      "url": "https://api.github.com/repos/403323726/PP-OCRv5/contents/rec/cyrillic_PP-OCRv5_rec_mobile.onnx?ref=376ddfd95322d6fcf41b489abc3780ff53b235ee",
+      "sha256": "90f761b4bfcce0c8c561c0cb5c887b0971d3ec01c32164bdf7374a35b0982711"
+    },
+    "eslav_PP-OCRv5_rec_mobile.onnx": {
+      "url": "https://api.github.com/repos/403323726/PP-OCRv5/contents/rec/eslav_PP-OCRv5_rec_mobile.onnx?ref=376ddfd95322d6fcf41b489abc3780ff53b235ee",
+      "sha256": "08705d6721849b1347d26187f15a5e362c431963a2a62bfff4feac578c489aab"
+    },
+    "PP-OCRv6_det_tiny.onnx": {
+      "url": "https://api.github.com/repos/BobLd/RapidOcrNet/contents/RapidOcrNet/models/v6/PP-OCRv6_det_tiny.onnx?ref=9d1f9f1f6c3ec6f0da123a420842390de9b97268",
+      "sha256": "f42c0fbd294d95eac1a550e131b277dac97462c8025fa4b6c3cec1b7894bd3d5"
+    }
+  }
+}

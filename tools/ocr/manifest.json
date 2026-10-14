@@ -1,0 +1,73 @@
+{
+  "sources": {
+    "zlib": {
+      "repository": "madler/zlib",
+      "tag": "v1.3.1",
+      "sha256": "17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c"
+    },
+    "png": {
+      "repository": "pnggroup/libpng",
+      "tag": "v1.6.50",
+      "sha256": "71158e53cfdf2877bc99bcab33641d78df3f48e6e0daad030afe9cb8c031aa46"
+    },
+    "jpeg": {
+      "repository": "libjpeg-turbo/libjpeg-turbo",
+      "tag": "3.1.2",
+      "sha256": "560f6338b547544c4f9721b18d8b87685d433ec78b3c644c70d77adad22c55e6"
+    },
+    "leptonica": {
+      "repository": "DanBloomberg/leptonica",
+      "tag": "1.87.0",
+      "sha256": "fa2b40c5caea96d1bb93a97486262aed8731b69ce25a84a6bf5d25323e33f631"
+    },
+    "tesseract": {
+      "repository": "tesseract-ocr/tesseract",
+      "tag": "5.5.3",
+      "sha256": "9218e62793116d42a9f6d14cd9348518b27f382096eea3d0f2d1a24616bb5884"
+    }
+  },
+  "models": {
+    "fast": {
+      "repository": "tesseract-ocr/tessdata_fast",
+      "commit": "87416418657359cb625c412a48b6e1d6d41c29bd",
+      "files": {
+        "rus.traineddata": {
+          "sha256": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225",
+          "bytes": 3861738
+        },
+        "eng.traineddata": {
+          "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+          "bytes": 4113088
+        }
+      }
+    },
+    "medium": {
+      "repository": "tesseract-ocr/tessdata",
+      "commit": "ced78752cc61322fb554c280d13360b35b8684e4",
+      "files": {
+        "rus.traineddata": {
+          "sha256": "681be2c2bead1bc7bd235df88c44e8e60ae73ae866840c0ad4e3b4c247bd37c2",
+          "bytes": 19920885
+        },
+        "eng.traineddata": {
+          "sha256": "daa0c97d651c19fba3b25e81317cd697e9908c8208090c94c3905381c23fc047",
+          "bytes": 23466654
+        }
+      }
+    },
+    "best": {
+      "repository": "tesseract-ocr/tessdata_best",
+      "commit": "e12c65a915945e4c28e237a9b52bc4a8f39a0cec",
+      "files": {
+        "rus.traineddata": {
+          "sha256": "b617eb6830ffabaaa795dd87ea7fd251adfe9cf0efe05eb9a2e8128b7728d6b6",
+          "bytes": 15301764
+        },
+        "eng.traineddata": {
+          "sha256": "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba",
+          "bytes": 15400601
+        }
+      }
+    }
+  }
+}

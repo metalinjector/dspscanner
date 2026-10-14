@@ -173,3 +173,43 @@ def test_secure_move_keeps_the_original_when_the_copy_cannot_be_verified(
 
     assert result.succeeded == 0
     assert source.read_bytes() == payload, "оригинал уничтожен без проверки копии"
+
+
+def test_exclusive_copy_does_not_remove_existing_target(tmp_path):
+    import pytest
+
+    source = tmp_path / "source.txt"
+    target = tmp_path / "existing.txt"
+    source.write_bytes(b"source")
+    target.write_bytes(b"someone else's file")
+    with pytest.raises(FileExistsError):
+        fops._copy_exclusive(source, target)
+    assert target.read_bytes() == b"someone else's file"
+
+
+def test_exclusive_copy_source_error_does_not_remove_target(tmp_path):
+    import pytest
+
+    target = tmp_path / "existing.txt"
+    target.write_bytes(b"keep me")
+    with pytest.raises(FileNotFoundError):
+        fops._copy_exclusive(tmp_path / "missing.txt", target)
+    assert target.read_bytes() == b"keep me"
+
+
+def test_exclusive_copy_cleans_own_partial_file(tmp_path, monkeypatch):
+    import pytest
+
+    source = tmp_path / "source.txt"
+    target = tmp_path / "new.txt"
+    source.write_bytes(b"source")
+
+    def fail(src, dst, **kwargs):
+        dst.write(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fops.shutil, "copyfileobj", fail)
+    with pytest.raises(OSError, match="disk full"):
+        fops._copy_exclusive(source, target)
+    assert not target.exists()
+    assert source.read_bytes() == b"source"
