@@ -193,8 +193,9 @@ CLI не импортирует PySide6/Qt. Для сервера без GUI м�
 -------------------
 
 --doc-method auto
-    Автоматический метод: сначала быстрая эвристика, затем LibreOffice или
-    MS Word только если эвристика не извлекла текст. Рекомендуется по умолчанию.
+    Автоматический метод: структура Word 97+ (piece table), затем эвристика
+    с предупреждением, затем LibreOffice/MS Word при неудаче. Эвристика
+    не гарантирует полноту; для сложных DOC выбирайте внешний конвертер явно.
 
 --doc-method libreoffice
     Использовать LibreOffice/soffice для legacy DOC.
@@ -267,6 +268,21 @@ CLI не импортирует PySide6/Qt. Для сервера без GUI м�
 
     Пример:
         --tesseract "D:\DSP\Tesseract-OCR\tesseract.exe"
+
+--ocr-model-tier {fast,medium,best}
+    Градация моделей OCR. Переопределяет application.ocr_model_tier из JSON.
+    Fast требует настоящих моделей в tessdata-fast рядом с Tesseract
+    (или на уровень выше). Если каталога нет, используются модели из
+    TESSDATA_PREFIX, папки tessdata рядом с Tesseract или системные.
+
+--russian-only / --no-russian-only
+    OCR на русском / rus+eng при наличии моделей. Переопределяет
+    application.russian_only из JSON. Язык и градация модели независимы.
+    Эквиваленты для окружения, наследуемого дочерними процессами:
+        DSP_SCANNER_OCR_MODEL_TIER=fast
+        DSP_SCANNER_RUSSIAN_ONLY=0
+    Для bool поддержаны true/false, 1/0, yes/no, on/off.
+
 
 Пути и лимиты CLI передаются дочерним процессам чтения через переменные
 окружения и не перезаписывают пользовательский JSON.
@@ -575,3 +591,31 @@ CLI не импортирует PySide6/Qt. Для сервера без GUI м�
 
 Если CLI запускается без JSON и без `--path`, он также использует системный
 набор путей по умолчанию.
+
+
+TESSERACT: УСТАНОВКА И ПРОВЕРКА РЕЖИМОВ
+---------------------------------------
+Linux (нужны C/C++, make и CMake >= 3.22):
+    python tools/install_tesseract.py --build
+
+Если бинарь уже установлен в Tesseract-OCR или Tesseract-OCR/bin:
+    python tools/install_tesseract.py
+    python tools/install_tesseract.py --verify-only
+
+По умолчанию устанавливаются rus/eng для fast, medium (стандартный tessdata),
+best. Для сокращённой установки: --tiers fast --languages rus.
+На Windows используется нативный tesseract.exe, не Linux-бинарь.
+Установщик проверяет SHA-256, версии закреплены в tools/ocr/manifest.json.
+
+Во всех режимах используется LSTM (--oem 1). Полная инструкция:
+    docs/OCR_SETUP.md
+
+ПРИНУДИТЕЛЬНЫЙ ЯЗЫК OCR
+----------------------
+--russian-only
+    Только rus для сканированных PDF. При отсутствии rus.traineddata OCR
+    не переключается на eng. Нужна установленная русская модель.
+--no-russian-only
+    Запрашивать rus+eng; если одной из моделей нет, OCR сообщает об ошибке.
+Оба флага не фильтруют текст DOC/DOCX/TXT и PDF с текстовым слоем.
+Выбор сохраняется через GUI; CLI-флаг действует на текущий запуск и его workers.

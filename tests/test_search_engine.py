@@ -271,3 +271,11 @@ def test_expanded_context_does_not_tokenize_the_whole_window():
         f"разобрано {total} символов при старой стоимости {old_cost} — "
         "окно контекста снова читает лишнее"
     )
+
+
+def test_aho_and_regex_agree_on_nonoverlapping_occurrences():
+    text = "aaaa"
+    short = find_matches(text, ["aa"])
+    long = find_matches(text, ["aa"] + [f"unused{i}" for i in range(31)])
+    assert [m.position for m in short] == [0, 2]
+    assert [(m.word, m.position) for m in long] == [(m.word, m.position) for m in short]

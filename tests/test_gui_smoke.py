@@ -1552,11 +1552,11 @@ def _make_op_files(tmp_path, count):
     return paths
 
 
-def _hold_copy_on_first_file(monkeypatch):
-    """Задерживает копирование на первом файле, пока тест не отпустит.
+def _hold_on_first_file(monkeypatch, name="_copy_exclusive"):
+    """Задерживает файловую операцию на первом файле, пока тест не отпустит.
 
     Без этого исход зависел от скорости диска: 30–40 маленьких файлов на
-    быстрой машине копировались быстрее, чем тест успевал вмешаться.
+    быстрой машине обрабатывались быстрее, чем тест успевал вмешаться.
     """
     import threading
 
@@ -1564,31 +1564,31 @@ def _hold_copy_on_first_file(monkeypatch):
 
     started = threading.Event()
     release = threading.Event()
-    original = file_operations._copy_exclusive
+    original = getattr(file_operations, name)
 
-    def held_copy(source, target):
+    def held(*args, **kwargs):
         started.set()
         release.wait(30)
-        original(source, target)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(file_operations, "_copy_exclusive", held_copy)
+    monkeypatch.setattr(file_operations, name, held)
     return started, release
 
 
-def test_secure_op_worker_cancel_reaches_the_file_layer(qt_app, tmp_path):
+def test_secure_op_worker_cancel_reaches_the_file_layer(qt_app, tmp_path, monkeypatch):
     """Флаг внутри воркера останавливает обработку реальных файлов."""
-    import time
-
     from app.gui.workers import SecureOpWorker
 
     files = _make_op_files(tmp_path, 30)
+    started, release = _hold_on_first_file(monkeypatch, "_overwrite_file")
     worker = SecureOpWorker("delete", files, passes=1)
     results = []
     worker.finished_ok.connect(results.append)
 
     worker.start()
-    time.sleep(0.05)
+    assert started.wait(10), "удаление не началось"
     worker._cancelled = True  # имитируем нажатие «Стоп»
+    release.set()
     assert worker.wait(30_000)
 
     qt_app.processEvents()
@@ -1604,7 +1604,7 @@ def test_copy_worker_reports_cancellation(qt_app, tmp_path, monkeypatch):
 
     files = _make_op_files(tmp_path, 30)
     destination = tmp_path / "copy_dst"
-    started, release = _hold_copy_on_first_file(monkeypatch)
+    started, release = _hold_on_first_file(monkeypatch)
     worker = CopyWorker(files, str(destination))
     results = []
     worker.finished_ok.connect(results.append)
@@ -1714,7 +1714,7 @@ def test_closing_the_window_waits_for_a_running_worker(
 
     files = _make_op_files(tmp_path, 40)
     destination = tmp_path / "dst_close"
-    started, release = _hold_copy_on_first_file(monkeypatch)
+    started, release = _hold_on_first_file(monkeypatch)
     worker = CopyWorker(files, str(destination), parent=window)
     window.copy_worker = worker
     worker.start()

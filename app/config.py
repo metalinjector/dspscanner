@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Set
 
 APP_NAME = "DSP Scanner"
-APP_VERSION = "4.7.5.2026"
+APP_VERSION = "4.7.6.2026"
 
 
 def _default_log_dir() -> Path:
@@ -94,7 +94,7 @@ class DocReadMethod(str, Enum):
     @property
     def label(self) -> str:
         return {
-            DocReadMethod.AUTO: "Авто: эвристика → внешние программы",
+            DocReadMethod.AUTO: "Авто: структура DOC → эвристика → внешние программы",
             DocReadMethod.LIBREOFFICE: "LibreOffice (наиболее точный)",
             DocReadMethod.COM: "MS Word COM (только Windows)",
             DocReadMethod.HEURISTIC: "Быстрая эвристика (без внешних программ)",

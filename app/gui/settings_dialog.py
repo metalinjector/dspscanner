@@ -117,9 +117,16 @@ class SettingsDialog(QDialog):
         self.russian_only.setToolTip(
             "Если включено, для OCR используется только язык rus.\n"
             "Модель и качество выбираются отдельно.\n"
+            "Не фильтрует текст DOC/DOCX/TXT и PDF с текстовым слоем.\n"
             "Выключите, если в документах много английского текста."
         )
         ext_layout.addRow(self.russian_only)
+        language_hint = QLabel(
+            "Только для OCR сканированных PDF. Отключите для русского и английского.\n"
+            "Обычные DOC/DOCX/TXT читаются без OCR; их текст не фильтруется."
+        )
+        language_hint.setWordWrap(True)
+        ext_layout.addRow(language_hint)
 
         # Выбор градации моделей OCR
         self.ocr_model_tier = QComboBox()

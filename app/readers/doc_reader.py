@@ -10,6 +10,7 @@ from typing import Optional
 from app.config import DocReadMethod
 from app.readers import doc_formats
 from app.readers.base import BaseReader, ReaderOutcome
+from app.readers.ole_doc import EncryptedDocError, read_ole2_text
 from app.settings_store import load_settings
 
 
@@ -123,7 +124,7 @@ class DocReader(BaseReader):
             if real_format == "XML":
                 return self._wrap(doc_formats.read_word_xml(data), "word2003-xml")
             if method == DocReadMethod.HEURISTIC:
-                return self._wrap(doc_formats.read_ole2_heuristic(data), "ole2-heuristic")
+                return self._heuristic_fallback(path, data)
             plain_text = doc_formats.read_as_plain_text(data)
             if plain_text:
                 return self._wrap(plain_text, "plain-text-fallback")
@@ -140,6 +141,17 @@ class DocReader(BaseReader):
             return self._heuristic_fallback(path, data)
         if method == DocReadMethod.HEURISTIC:
             return self._heuristic_fallback(path, data)
+
+        # Word97+ хранит логический текст в piece table; чтение её дешевле
+        # эвристического поиска строк в бинарных потоках и не теряет короткие слова.
+        if real_format == "OLE2":
+            try:
+                text = read_ole2_text(path)
+            except EncryptedDocError as exc:
+                return ReaderOutcome(error=str(exc), method_used="ole2-piece-table")
+            if text is not None:
+                return ReaderOutcome(text=text, method_used="ole2-piece-table",
+                                     warning=None if text else "В DOC нет доступного текста")
 
         # AUTO ориентирован на скорость: сначала дешёвая локальная эвристика,
         # затем точные внешние программы только для файлов, где эвристика не
@@ -172,7 +184,13 @@ class DocReader(BaseReader):
             data = self.read_bytes(path)
         if data is None:
             return ReaderOutcome(error="Не удалось прочитать байты файла")
-        return self._wrap(doc_formats.read_ole2_heuristic(data), "ole2-heuristic")
+        outcome = self._wrap(doc_formats.read_ole2_heuristic(data), "ole2-heuristic")
+        if outcome.text:
+            outcome.warning = (
+                "DOC прочитан эвристически: возможны пропуски и служебный текст. "
+                "Для полной проверки выберите LibreOffice или MS Word COM."
+            )
+        return outcome
 
     @staticmethod
     def _wrap(text: Optional[str], method: str) -> ReaderOutcome:
