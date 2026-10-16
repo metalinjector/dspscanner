@@ -8,6 +8,8 @@ dist/
 build/
 *.egg
 *.spec
+# Exception: PyInstaller spec is part of the reproducible build, keep it tracked
+!build_exe.spec
 
 # Virtual environment
 .venv/
