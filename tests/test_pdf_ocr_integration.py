@@ -27,9 +27,29 @@ def real_ocr(monkeypatch):
         monkeypatch.setenv(key, value)
 
 
+# Кандидаты шрифтов с кириллицей: DejaVu в Linux, Arial/Segoe UI в Windows,
+# Arial Unicode в macOS. Тесты opt-in (DSP_TEST_TESSDATA), в CI без шрифта
+# они пропускаются с понятным сообщением, а не падают.
+_FONT_CANDIDATES = (
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+    r'C:\Windows\Fonts\arial.ttf',
+    r'C:\Windows\Fonts\segoeui.ttf',
+    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+    '/Library/Fonts/Arial Unicode.ttf',
+)
+
+
+def _cyrillic_font_path() -> Path:
+    for candidate in _FONT_CANDIDATES:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    pytest.skip('нет шрифта с кириллицей среди кандидатов: ' + ', '.join(_FONT_CANDIDATES))
+
+
 def make_scan(path, *, mixed=False, pages=1):
-    font_path = Path('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
-    assert font_path.exists(), 'DejaVu Sans required for Cyrillic fixture'
+    font_path = _cyrillic_font_path()
     with fitz.open() as source:
         page = source.new_page(width=595, height=842)
         page.insert_font(fontname='dspfont', fontfile=str(font_path))
