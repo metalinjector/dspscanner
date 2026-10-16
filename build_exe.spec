@@ -2,12 +2,16 @@
 """PyInstaller spec для DSP Scanner — сборка одного exe.
 
 Отслеживается в репозитории (исключение из '*.spec'), чтобы сборка
-воспроизводилась из чистого клона. Скрытые импорты сверены со структурой main
-(линия 4.7.6.2026, включая app.readers.ole_doc и app.scanning.pdf_cache).
-При добавлении новых модулей app.* дополняйте hiddenimports.
+воспроизводилась из чистого клона. Сборка:
+
+    python -m PyInstaller --clean --noconfirm \
+        --upx-dir tools/upx/upx-4.2.4-win64 build_exe.spec
+
+Каталог UPX сам не ищется: PyInstaller берёт его только из PATH или
+--upx-dir. Без UPX сборка тоже проходит, exe просто больше.
 """
 
-BLOCK_CIPHER = None
+from PyInstaller.utils.hooks import collect_submodules
 
 a = Analysis(
     ['main.py'],
@@ -25,51 +29,6 @@ a = Analysis(
         'PySide6.QtGui',
         'PySide6.QtWidgets',
         'PySide6.QtSvg',
-        # Readers
-        'app.readers',
-        'app.readers.base',
-        'app.readers.doc_formats',
-        'app.readers.doc_reader',
-        'app.readers.docx_reader',
-        'app.readers.ole_doc',
-        'app.readers.pdf_reader',
-        'app.readers.txt_reader',
-        # Scanning
-        'app.scanning',
-        'app.scanning.file_finder',
-        'app.scanning.scanner',
-        'app.scanning.search_engine',
-        'app.scanning.term_parser',
-        'app.scanning.pdf_cache',
-        # Export
-        'app.export',
-        'app.export.excel_export',
-        'app.export.safety',
-        'app.export.text_exports',
-        # GUI
-        'app.gui',
-        'app.gui.main_window',
-        'app.gui.results_model',
-        'app.gui.settings_dialog',
-        'app.gui.email_settings_dialog',
-        'app.gui.result_contexts_dialog',
-        'app.gui.unreadable_files_dialog',
-        'app.gui.terms_field',
-        'app.gui.theme',
-        'app.gui.workers',
-        # File ops
-        'app.fileops',
-        'app.fileops.file_operations',
-        # Other
-        'app.config',
-        'app.logging_utils',
-        'app.reporting',
-        'app.settings_store',
-        'app.scan_config_store',
-        'app.email_settings',
-        'app.email_sender',
-        'app.default_paths',
-        'app.cli',
         # Third-party
         'olefile',
         'striprtf',
@@ -79,8 +38,8 @@ a = Analysis(
         'charset_normalizer',
         'pymupdf',
         'openpyxl',
-        'python_docx',
-    ],
+        'docx',
+    ] + collect_submodules('app'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -103,7 +62,7 @@ a = Analysis(
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=BLOCK_CIPHER)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,
