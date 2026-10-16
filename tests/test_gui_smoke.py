@@ -6,6 +6,7 @@ Qt — тогда рабочим остаётся только CLI-режим, �
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -819,6 +820,27 @@ def test_checkbox_delegate_paints_without_crashing(qt_app):
         CheckboxDelegate().paint(painter, option, model.index(0, CHECK_COLUMN))
     finally:
         painter.end()
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 12), reason="None и True бессмертны начиная с Python 3.12"
+)
+def test_signal_delivery_keeps_none_refcount(qt_app):
+    """PySide6 6.12.0 на Python 3.10/3.11 терял ссылку на None при каждом слоте.
+
+    Сканирование шлёт тысячи сигналов, и окно падало в случайный момент —
+    например, на следующем клике по галочке. Такую версию исключает
+    requirements.txt; тест ловит повтор в будущих выпусках.
+    """
+    from PySide6.QtWidgets import QCheckBox
+
+    checkbox = QCheckBox()
+    checkbox.toggled.connect(lambda _checked: None)
+    checkbox.toggle()
+    before = sys.getrefcount(None)
+    for _ in range(200):
+        checkbox.toggle()
+    assert sys.getrefcount(None) - before > -50
 
 
 def test_column_delegates_are_owned_by_their_table(window):
