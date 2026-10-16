@@ -1038,9 +1038,18 @@ class MainWindow(QMainWindow):
         for index, width in enumerate(widths):
             table.setColumnWidth(index, width)
 
-        table.setItemDelegateForColumn(_CHECK_COLUMN_INDEX, CheckboxDelegate(self))
-        table.setItemDelegateForColumn(1, HighlightDelegate(filename_column=True))
-        table.setItemDelegateForColumn(_CONTEXT_COLUMN_INDEX, HighlightDelegate())
+        # Делегатами владеет сама таблица. setItemDelegateForColumn владение
+        # не передаёт, а PySide6 (по крайней мере 6.8) держит Python-ссылку
+        # лишь на последний назначенный делегат: делегат «Файла» без родителя
+        # уничтожался сборщиком мусора, и первая же перерисовка после клика
+        # по галочке обращалась к удалённому объекту — процесс падал.
+        table.setItemDelegateForColumn(_CHECK_COLUMN_INDEX, CheckboxDelegate(table))
+        table.setItemDelegateForColumn(
+            1, HighlightDelegate(filename_column=True, parent=table)
+        )
+        table.setItemDelegateForColumn(
+            _CONTEXT_COLUMN_INDEX, HighlightDelegate(parent=table)
+        )
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         return header
 
