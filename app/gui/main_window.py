@@ -320,6 +320,11 @@ class MainWindow(QMainWindow):
         self._unreadable_entries = []
         self.email_settings = EmailSettings()
         self._closing_after_scan = False
+        # Кнопка «Стоп» должна знать, что сейчас выполняется. Опираться на
+        # QThread.isRunning() в обработчиках завершения нельзя: воркер шлёт
+        # сигнал из run() до выхода из потока, и поток может быть ещё жив.
+        self._scan_active = False
+        self._file_op_active = False
         # Флаги подгонки ширины «Контекста» выставляются до _build_ui():
         # обработчик sectionResized подключается уже там.
         self._context_column_user_sized = False
@@ -468,7 +473,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setObjectName("stopButton")
         self.stop_btn.setProperty("active", False)
         self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._cancel_scan)
+        self.stop_btn.clicked.connect(self._cancel_active_operation)
         self.stop_btn.setFixedWidth(100)
         progress_row.addWidget(self.stop_btn)
         monitor_layout.addLayout(progress_row)
@@ -1378,13 +1383,15 @@ class MainWindow(QMainWindow):
         self.unreadable_files_btn.setEnabled(False)
         if dialog.selected_action == UnreadableFilesDialog.ACTION_COPY:
             destination = dialog.destination
-            self.error_copy_worker = CopyWorker(paths, destination)
+            self.error_copy_worker = CopyWorker(paths, destination, parent=self)
             self.error_copy_worker.finished_ok.connect(
                 lambda mappings, expected=len(paths), target=destination: (
                     self._on_unreadable_copy_finished(mappings, expected, target)
                 )
             )
             self.error_copy_worker.failed.connect(self._on_unreadable_operation_failed)
+            self.error_copy_worker.progress.connect(self._on_file_op_progress)
+            self._mark_file_op_active(True)
             self.status_bar.showMessage("Копирование файлов с ошибками чтения…")
             self.error_copy_worker.start()
             return
@@ -1399,6 +1406,7 @@ class MainWindow(QMainWindow):
             paths,
             dialog.destination,
             passes=load_settings().secure_passes,
+            parent=self,
         )
         self.error_secure_worker.finished_ok.connect(
             lambda result, operation=mode: self._on_unreadable_secure_finished(
@@ -1406,6 +1414,8 @@ class MainWindow(QMainWindow):
             )
         )
         self.error_secure_worker.failed.connect(self._on_unreadable_operation_failed)
+        self.error_secure_worker.progress.connect(self._on_file_op_progress)
+        self._mark_file_op_active(True)
         self.status_bar.showMessage(
             "Безопасное перемещение файлов с ошибками чтения…"
             if mode == "move"
@@ -1417,15 +1427,21 @@ class MainWindow(QMainWindow):
         self, mappings: List[CopyMapping], expected: int, destination: str
     ) -> None:
         self.unreadable_files_btn.setEnabled(True)
+        self._mark_file_op_active(False)
         copied = len(mappings)
         self.status_bar.showMessage(
             f"Скопировано ошибочных файлов: {copied} из {expected}"
         )
         if copied < expected:
+            cancelled_note = (
+                "\nОстальные файлы не копировались — операция прервана пользователем."
+                if getattr(self.error_copy_worker, "was_cancelled", False)
+                else ""
+            )
             QMessageBox.warning(
                 self,
                 "Копирование завершено частично",
-                f"Скопировано файлов: {copied} из {expected}.\n\n"
+                f"Скопировано файлов: {copied} из {expected}.{cancelled_note}\n\n"
                 f"Папка назначения:\n{destination}",
             )
         else:
@@ -1456,10 +1472,16 @@ class MainWindow(QMainWindow):
         self, operation: str, result: OperationResult
     ) -> None:
         self.unreadable_files_btn.setEnabled(True)
+        self._mark_file_op_active(False)
         self._refresh_found_files_after_operation()
         self._sync_unreadable_entries_after_operation()
         action_text = "перемещено" if operation == "move" else "удалено"
         message = f"Успешно {action_text} файлов: {result.succeeded}"
+        if getattr(result, "cancelled", False):
+            message += (
+                "\n\nОстальные файлы не обрабатывались — "
+                "операция прервана пользователем."
+            )
         if result.failures:
             preview = "\n".join(result.failures[:8])
             extra = (
@@ -1479,6 +1501,7 @@ class MainWindow(QMainWindow):
 
     def _on_unreadable_operation_failed(self, message: str) -> None:
         self.unreadable_files_btn.setEnabled(True)
+        self._mark_file_op_active(False)
         QMessageBox.critical(self, "Ошибка файловой операции", message)
         self._maybe_close_after_workers()
 
@@ -1812,9 +1835,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("Обработано: 0 / 0")
 
         self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.stop_btn.setProperty("active", True)
-        self.stop_btn.style().polish(self.stop_btn)
+        self._mark_scan_active(True)
 
         # Автопереключение на "Результаты" (рекомендация отчёта)
         self.tabs.setCurrentIndex(0)
@@ -1879,13 +1900,83 @@ class MainWindow(QMainWindow):
         self._scan_timer.timeout.connect(self._update_scan_timer)
         self._scan_timer.start()
 
+    def _disarm_stop_button(self) -> None:
+        """Гасит кнопку «Стоп» безусловно (немедленный отклик на нажатие)."""
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setProperty("active", False)
+        self.stop_btn.style().polish(self.stop_btn)
+
+    def _arm_stop_button(self) -> None:
+        """Зажигает «Стоп» безусловно."""
+        self.stop_btn.setEnabled(True)
+        self.stop_btn.setProperty("active", True)
+        self.stop_btn.style().polish(self.stop_btn)
+
+    def _update_stop_button(self) -> None:
+        """Приводит кнопку в соответствие с тем, что сейчас выполняется.
+
+        Сканирование и файловая операция учитываются раздельно: пока идёт
+        хотя бы одна из них, «Стоп» остаётся доступным.
+        """
+        if self._scan_active or self._file_op_active:
+            self._arm_stop_button()
+            return
+        self._disarm_stop_button()
+
+    def _mark_scan_active(self, active: bool) -> None:
+        self._scan_active = active
+        self._update_stop_button()
+
+    def _mark_file_op_active(self, active: bool) -> None:
+        self._file_op_active = active
+        self._update_stop_button()
+
     def _cancel_scan(self) -> None:
         if self.scan_worker is not None:
             self.scan_worker.cancel()
-            self.stop_btn.setEnabled(False)
-            self.stop_btn.setProperty("active", False)
-            self.stop_btn.style().polish(self.stop_btn)
+            self._scan_active = False
+            self._disarm_stop_button()
             self.logger.warning("Сканирование прервано пользователем")
+
+    def _cancel_active_operation(self) -> None:
+        """Кнопка «Стоп» обслуживает и сканирование, и файловые операции.
+
+        Потоки файловых операций получили флаг отмены, но вызвать его было
+        некому: слот оставался мёртвым кодом. Теперь «Стоп» прерывает то,
+        что сейчас идёт. Файловая операция прекращается после текущего файла:
+        уже затёртые файлы остаются удалёнными, это необратимо.
+        """
+        stopped_something = False
+        if self.scan_worker is not None and self.scan_worker.isRunning():
+            self.scan_worker.cancel()
+            self._scan_active = False
+            self.logger.warning("Сканирование прервано пользователем")
+            stopped_something = True
+        if self._cancel_running_file_operation():
+            self._file_op_active = False
+            stopped_something = True
+        # Кнопку гасим сразу: результат придёт сигналом чуть позже, а
+        # повторные нажатия «Стоп» ничего не добавляют.
+        self._disarm_stop_button() if stopped_something else self._update_stop_button()
+
+    def _cancel_running_file_operation(self) -> bool:
+        """Прерывает активную файловую операцию. True — если было что прерывать."""
+        cancelled = False
+        for worker in (
+            self.copy_worker,
+            self.secure_worker,
+            self.error_copy_worker,
+            self.error_secure_worker,
+        ):
+            if worker is not None and worker.isRunning():
+                worker.cancel()
+                cancelled = True
+        if cancelled:
+            self.status_bar.showMessage(
+                "Остановка файловой операции: текущий файл будет завершён…"
+            )
+            self.logger.warning("Файловая операция прервана пользователем")
+        return cancelled
 
     def _on_progress(self, current: int, total: int, message: str) -> None:
         # total == 0 означает подготовительную фазу: идёт предварительный
@@ -2021,9 +2112,7 @@ class MainWindow(QMainWindow):
     def _on_scan_failed(self, message: str) -> None:
         self._stop_scan_timer()
         self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setProperty("active", False)
-        self.stop_btn.style().polish(self.stop_btn)
+        self._mark_scan_active(False)
         self.status_bar.showMessage("Сканирование завершилось внутренней ошибкой")
         self.logger.error("Сбой рабочего потока сканирования: %s", message)
         self._unreadable_entries = []
@@ -2047,9 +2136,7 @@ class MainWindow(QMainWindow):
         self._populate_found_files()
         self._auto_fit_context_column()
         self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setProperty("active", False)
-        self.stop_btn.style().polish(self.stop_btn)
+        self._mark_scan_active(False)
 
         status = "отменено" if report.cancelled else "завершено"
         if report.stats.processed > 0:
@@ -2447,20 +2534,33 @@ class MainWindow(QMainWindow):
 
     def _on_copy_finished(self, mappings: List[CopyMapping]) -> None:
         self._set_secure_controls_enabled(True)
+        self._mark_file_op_active(False)
         self.copy_mappings = mappings
+        cancelled = bool(
+            self.copy_worker is not None and getattr(self.copy_worker, "was_cancelled", False)
+        )
         self.status_bar.showMessage(f"Скопировано файлов: {len(mappings)}")
+        note = (
+            "\n\nОперация прервана: остальные файлы не копировались."
+            if cancelled
+            else ""
+        )
         QMessageBox.information(
             self,
-            "Копирование завершено",
-            f"Скопировано {len(mappings)} файлов в:\n{self.copy_dest_edit.text()}",
+            "Копирование прервано" if cancelled else "Копирование завершено",
+            f"Скопировано {len(mappings)} файлов в:\n{self.copy_dest_edit.text()}{note}",
         )
         self._open_path(self.copy_dest_edit.text())
         self._maybe_close_after_workers()
 
     def _on_copy_failed(self, message: str) -> None:
         self._set_secure_controls_enabled(True)
+        self._mark_file_op_active(False)
         QMessageBox.critical(self, "Ошибка копирования", message)
         self._maybe_close_after_workers()
+
+    def _on_file_op_progress(self, current: int, total: int, file_name: str) -> None:
+        self.status_bar.showMessage(f"Обработка файлов ({current}/{total}): {file_name}")
 
     # -- Единый конвейер безопасных операций -------------------------- #
     #
@@ -2495,12 +2595,15 @@ class MainWindow(QMainWindow):
             paths,
             destination or "",
             passes=load_settings().secure_passes,
+            parent=self,
         )
         self.secure_worker.finished_ok.connect(
             lambda result: self._on_secure_finished(action, result)
         )
         self.secure_worker.failed.connect(self._on_secure_failed)
+        self.secure_worker.progress.connect(self._on_file_op_progress)
         self._set_secure_controls_enabled(False)
+        self._mark_file_op_active(True)
         self.status_bar.showMessage(
             "Безопасное перемещение отмеченных файлов…"
             if mode == "move"
@@ -2566,10 +2669,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Не указан путь", "Укажите папку назначения.")
             return
 
-        self.copy_worker = CopyWorker(paths, destination)
+        self.copy_worker = CopyWorker(paths, destination, parent=self)
         self.copy_worker.finished_ok.connect(self._on_copy_finished)
         self.copy_worker.failed.connect(self._on_copy_failed)
+        self.copy_worker.progress.connect(self._on_file_op_progress)
         self._set_secure_controls_enabled(False)
+        self._mark_file_op_active(True)
         self.status_bar.showMessage("Копирование отмеченных файлов…")
         self.copy_worker.start()
 
@@ -2631,8 +2736,32 @@ class MainWindow(QMainWindow):
 
     def _on_secure_finished(self, action: str, result: OperationResult) -> None:
         self._set_secure_controls_enabled(True)
+        self._mark_file_op_active(False)
         self._refresh_found_files_after_operation()
         message = f"Успешно {action} файлов: {result.succeeded}"
+        if getattr(result, "cancelled", False):
+            # Отмена — не ошибка и не «частичный сбой»: файлы, до которых
+            # очередь не дошла, не считаются неудачными.
+            remaining = "Остальные файлы не обрабатывались — операция прервана пользователем."
+            if result.failures:
+                preview = "\n".join(result.failures[:8])
+                extra = (
+                    f"\n…ещё ошибок: {len(result.failures) - 8}"
+                    if len(result.failures) > 8
+                    else ""
+                )
+                QMessageBox.warning(
+                    self,
+                    "Операция прервана",
+                    f"{message}\n\n{remaining}\n\nНе удалось обработать: "
+                    f"{len(result.failures)}\n{preview}{extra}",
+                )
+            else:
+                QMessageBox.information(
+                    self, "Операция прервана", f"{message}\n\n{remaining}"
+                )
+            self._maybe_close_after_workers()
+            return
         if result.failures:
             preview = "\n".join(result.failures[:8])
             extra = (
@@ -2651,6 +2780,7 @@ class MainWindow(QMainWindow):
 
     def _on_secure_failed(self, message: str) -> None:
         self._set_secure_controls_enabled(True)
+        self._mark_file_op_active(False)
         QMessageBox.critical(self, "Ошибка", message)
         self._maybe_close_after_workers()
 
@@ -3019,7 +3149,56 @@ class MainWindow(QMainWindow):
     def _maybe_close_after_workers(self) -> None:
         if self._closing_after_scan and not self._workers_running():
             self._closing_after_scan = False
+            # Воркеры убираются ДО закрытия окна и с ожиданием: QThread,
+            # разрушенный при живом потоке, вызывает abort (0xC0000409).
+            self._dispose_finished_workers()
             self.close()
+
+    def _dispose_finished_workers(self, timeout_ms: int = 30_000) -> None:
+        """Дожидается и отпускает воркеры, снимая ссылки на них.
+
+        Кадр «QThread: Destroyed while thread is still running» из Qt — это
+        не предупреждение, а qFatal: поток, разрушенный сборщиком мусора
+        Python или при удалении родителя, валит процесс через ``__fastfail``
+        (код возврата 0xC0000409). Дамп падения показывает, что именно так и
+        падало приложение: abort вызывается из деструктора Qt во время
+        завершения интерпретатора. Поэтому каждый воркер дожидается явно, и
+        только потом снимается ссылка; удаление откладывается через
+        ``deleteLater``, чтобы не разрушать QObject в чужом стеке вызовов.
+        """
+        names = (
+            "scan_worker",
+            "copy_worker",
+            "secure_worker",
+            "error_copy_worker",
+            "error_secure_worker",
+            "email_worker",
+            "single_file_worker",
+        )
+        for name in names:
+            worker = getattr(self, name, None)
+            if worker is None:
+                continue
+            if worker.isRunning() and not worker.wait(timeout_ms):
+                # Живой воркер не разрушаем ни при каких условиях.
+                self.logger.warning(
+                    "Воркер %s не завершился за %.1f с и не будет разрушен",
+                    name,
+                    timeout_ms / 1000,
+                )
+                continue
+            worker.deleteLater()
+            setattr(self, name, None)
+
+    def shutdown_workers(self) -> None:
+        """Дожидается воркеров после выхода из цикла событий.
+
+        Вызывается из ``main()`` после ``app.exec()``: цикл событий уже не
+        работает, обработчики ``finished`` не вызовутся — но дождаться
+        потоков обязательно, иначе завершение интерпретатора разрушит живой
+        QThread и процесс упадёт с 0xC0000409 вместо нормального выхода.
+        """
+        self._dispose_finished_workers(timeout_ms=10_000)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.settings_store.setValue("geometry", self.saveGeometry())
@@ -3036,4 +3215,6 @@ class MainWindow(QMainWindow):
                 )
             event.ignore()
             return
+        # Ни один воркер не работает — отпускаем их до разрушения окна.
+        self._dispose_finished_workers()
         super().closeEvent(event)

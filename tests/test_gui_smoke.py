@@ -23,10 +23,35 @@ from app.gui.results_model import ResultsTableModel, highlight_html, is_filename
 from app.gui.workers import SingleFileTestWorker
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def qt_app():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _dispose_gui_objects(qt_app):
+    """Destroy widgets with Qt alive, not during interpreter finalization.
+
+    close() only hides most widgets. Signal/slot cycles can keep their wrappers
+    alive until shutdown, when Qt and Python may destroy them in either order.
+    Explicit DeferredDelete processing also covers dialogs using deleteLater().
+    """
+    import gc
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from shiboken6 import isValid
+
+    yield
+    widgets = list(qt_app.topLevelWidgets())
+    for widget in widgets:
+        if isValid(widget):
+            widget.close()
+            widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert all(not isValid(widget) for widget in widgets)
+    widgets.clear()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def _result(name="a.txt", word="договор", context="в тексте договор найден"):
@@ -378,10 +403,16 @@ def test_single_file_diagnostic_runs_outside_gui_thread(qt_app, tmp_path):
     loop = QEventLoop()
     worker.finished_ok.connect(lambda outcome, elapsed: (captured.update(outcome=outcome), loop.quit()))
     worker.failed.connect(lambda message: (captured.update(error=message), loop.quit()))
-    QTimer.singleShot(60_000, loop.quit)
-    worker.start()
-    loop.exec()
-    worker.wait(10_000)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(60_000)
+    try:
+        worker.start()
+        loop.exec()
+    finally:
+        timeout.stop()
+        assert worker.wait(10_000)
 
     assert "error" not in captured, captured.get("error")
     assert "договоре" in captured["outcome"].text
@@ -395,10 +426,16 @@ def test_diagnostic_worker_reports_unreadable_file_without_raising(qt_app, tmp_p
     loop = QEventLoop()
     worker.finished_ok.connect(lambda outcome, elapsed: (captured.update(outcome=outcome), loop.quit()))
     worker.failed.connect(lambda message: (captured.update(error=message), loop.quit()))
-    QTimer.singleShot(30_000, loop.quit)
-    worker.start()
-    loop.exec()
-    worker.wait(10_000)
+    timeout = QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(30_000)
+    try:
+        worker.start()
+        loop.exec()
+    finally:
+        timeout.stop()
+        assert worker.wait(10_000)
 
     assert "error" not in captured
     assert captured["outcome"].error
@@ -1475,3 +1512,256 @@ def test_plain_help_text_is_not_forced_into_rich_text(window):
         assert dialog.textFormat() == Qt.TextFormat.AutoText
     finally:
         dialog.deleteLater()
+
+
+def test_ocr_settings_roundtrip(qt_app, monkeypatch):
+    from app.gui import settings_dialog
+    from app.settings_store import AppSettings
+    monkeypatch.setattr(settings_dialog, 'load_settings', lambda: AppSettings())
+    captured = []
+    monkeypatch.setattr(settings_dialog, 'save_settings', lambda value: captured.append(value) or True)
+    dialog = settings_dialog.SettingsDialog()
+    # Индексы берём по data: порядок пунктов — не контракт, a2fast встал первым.
+    dialog.ocr_quality.setCurrentIndex(dialog.ocr_quality.findData('thorough'))
+    dialog.ocr_model_tier.setCurrentIndex(dialog.ocr_model_tier.findData('best'))
+    dialog.russian_only.setChecked(False)
+    dialog.ocr_force.setChecked(True)
+    dialog.ocr_workers.setValue(4)
+    dialog.ocr_page_timeout.setValue(90)
+    dialog.pdf_timeout.setValue(3600)
+    dialog._accept()
+    assert captured[0].ocr_quality == 'thorough'
+    assert captured[0].ocr_model_tier == 'best'
+    assert captured[0].russian_only is False and captured[0].ocr_force is True
+    assert captured[0].ocr_workers == 4 and captured[0].ocr_page_timeout == 90
+    assert captured[0].pdf_timeout == 3600
+    dialog.close()
+
+# --------------------------------------------------------------------- #
+# Отмена файловых операций: флаг воркера доходит до файлового слоя,
+# а «Стоп» обслуживает и сканирование, и операции над файлами
+# --------------------------------------------------------------------- #
+
+
+def _make_op_files(tmp_path, count):
+    paths = []
+    for index in range(count):
+        item = tmp_path / f"op_file_{index}.txt"
+        item.write_bytes(b"payload " * 500)
+        paths.append(str(item))
+    return paths
+
+
+def _hold_on_first_file(monkeypatch, name="_copy_exclusive"):
+    """Задерживает файловую операцию на первом файле, пока тест не отпустит.
+
+    Без этого исход зависел от скорости диска: 30–40 маленьких файлов на
+    быстрой машине обрабатывались быстрее, чем тест успевал вмешаться.
+    """
+    import threading
+
+    from app.fileops import file_operations
+
+    started = threading.Event()
+    release = threading.Event()
+    original = getattr(file_operations, name)
+
+    def held(*args, **kwargs):
+        started.set()
+        release.wait(30)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(file_operations, name, held)
+    return started, release
+
+
+def test_secure_op_worker_cancel_reaches_the_file_layer(qt_app, tmp_path, monkeypatch):
+    """Флаг внутри воркера останавливает обработку реальных файлов."""
+    from app.gui.workers import SecureOpWorker
+
+    files = _make_op_files(tmp_path, 30)
+    started, release = _hold_on_first_file(monkeypatch, "_overwrite_file")
+    worker = SecureOpWorker("delete", files, passes=1)
+    results = []
+    worker.finished_ok.connect(results.append)
+
+    worker.start()
+    assert started.wait(10), "удаление не началось"
+    worker._cancelled = True  # имитируем нажатие «Стоп»
+    release.set()
+    assert worker.wait(30_000)
+
+    qt_app.processEvents()
+    assert results, "воркер не отдал результат"
+    result = results[0]
+    assert result.cancelled is True
+    assert result.succeeded < len(files), "отмена не остановила обработку"
+
+
+def test_copy_worker_reports_cancellation(qt_app, tmp_path, monkeypatch):
+    """Копирование тоже прерывается, и воркер сообщает об отмене."""
+    from app.gui.workers import CopyWorker
+
+    files = _make_op_files(tmp_path, 30)
+    destination = tmp_path / "copy_dst"
+    started, release = _hold_on_first_file(monkeypatch)
+    worker = CopyWorker(files, str(destination))
+    results = []
+    worker.finished_ok.connect(results.append)
+
+    worker.start()
+    assert started.wait(10), "копирование не началось"
+    worker._cancelled = True
+    release.set()
+    assert worker.wait(30_000)
+
+    qt_app.processEvents()
+    assert worker.was_cancelled is True
+    assert results, "воркер не отдал список копий"
+    assert len(results[0]) < len(files), "отмена не остановила копирование"
+
+
+def test_file_operations_do_not_flag_cancellation_without_it(tmp_path):
+    """Обычный прогон не помечается отменённым — иначе отчёт врал бы."""
+    from app.fileops import file_operations as fops
+
+    files = _make_op_files(tmp_path, 3)
+    result = fops.secure_delete_files(files, passes=1)
+    assert result.cancelled is False
+    assert result.succeeded == 3
+
+
+def test_stop_button_greets_the_file_operation_start(window, tmp_path, monkeypatch):
+    """На старте операции кнопка зажигается — иначе прервать её нечем."""
+    from PySide6.QtWidgets import QMessageBox
+
+    source = tmp_path / "src" / "doc.txt"
+    source.parent.mkdir()
+    source.write_text("содержимое", encoding="utf-8")
+    window._on_results_found([
+        SearchResult(source.name, str(source), "содержимое", "содержимое", "txt", "2026")
+    ])
+    window.results_model.set_all_checked(True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
+
+    window._secure_delete_checked()
+    assert window._file_op_active is True, "кнопка «Стоп» не зажглась на время операции"
+    assert window.stop_btn.isEnabled() is True
+    window.secure_worker.wait(30_000)
+    qt_app_process_events(window)
+
+    assert window._file_op_active is False
+    assert window.stop_btn.isEnabled() is False, "после завершения «Стоп» должен гаснуть"
+
+
+def test_cancel_marks_the_running_file_operation(window, tmp_path, monkeypatch):
+    """Нажатие «Стоп» реально прерывает операцию и снимает флаг активности."""
+    from PySide6.QtWidgets import QMessageBox
+
+    files = _make_op_files(tmp_path, 40)
+    results = [
+        SearchResult(Path(path).name, path, "payload", "payload", "txt", "2026")
+        for path in files
+    ]
+    window._on_results_found(results)
+    window.results_model.set_all_checked(True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
+
+    window._start_secure_operation("delete", files)
+    assert window._file_op_active is True
+
+    window._cancel_active_operation()
+    assert window._file_op_active is False
+    assert window.secure_worker._cancelled is True
+    window.secure_worker.wait(30_000)
+    qt_app_process_events(window)
+
+
+def test_stop_button_survives_a_scan_and_a_file_operation_together(window, monkeypatch):
+    """Пока идёт хотя бы одна задача, «Стоп» остаётся доступным.
+
+    Раньше завершение файловой операции безусловно гасило кнопку — и
+    параллельно идущее сканирование оставалось без возможности остановки.
+    """
+    window._mark_scan_active(True)
+    window._mark_file_op_active(True)
+    assert window.stop_btn.isEnabled() is True
+
+    window._mark_file_op_active(False)
+    assert window.stop_btn.isEnabled() is True, "скан ещё идёт — кнопка обязана жить"
+
+    window._mark_scan_active(False)
+    assert window.stop_btn.isEnabled() is False
+
+def test_closing_the_window_waits_for_a_running_worker(
+    window, qt_app, tmp_path, monkeypatch
+):
+    """Закрытие окна не разрушает живой воркер: иначе процесс падает с abort.
+
+    Регрессионный тест на реальный вылет 0xC0000409: Qt вызывает qFatal
+    («QThread: Destroyed while thread is still running») из деструктора, когда
+    объект потока умирает раньше самого потока. Здесь воркер запускается и
+    окно закрывается сразу — проверяем, что процесс не падает, поток
+    дожидается, а ссылка на воркер снимается.
+    """
+    import threading
+
+    from app.gui.workers import CopyWorker
+
+    files = _make_op_files(tmp_path, 40)
+    destination = tmp_path / "dst_close"
+    started, release = _hold_on_first_file(monkeypatch)
+    worker = CopyWorker(files, str(destination), parent=window)
+    window.copy_worker = worker
+    worker.start()
+    assert started.wait(10), "воркер не успел запуститься"
+    assert worker.isRunning()
+    # Поток отпускается уже во время ожидания: shutdown_workers() обязан
+    # дождаться живого потока, а не застать его завершённым.
+    threading.Timer(0.2, release.set).start()
+
+    # Симулируем выход: то, что делает main() после app.exec().
+    window.shutdown_workers()
+
+    assert worker.isRunning() is False, "живой поток пережил выход — будет abort"
+    assert window.copy_worker is None, "ссылка на воркер не снята"
+
+
+def test_shutdown_workers_is_safe_without_any_worker(window):
+    """Выход без запущенных операций не должен ничего ломать."""
+    window.shutdown_workers()
+    assert window.scan_worker is None
+    assert window.copy_worker is None
+    assert window.secure_worker is None
+
+
+def test_shutdown_workers_keeps_a_stuck_worker_alive(window, monkeypatch):
+    """Зависший воркер не разрушается: abort хуже, чем незакрытый поток."""
+    import threading
+
+    from PySide6.QtCore import QThread
+
+    release = threading.Event()
+
+    class Stuck(QThread):
+        def run(self):
+            release.wait(30)
+
+    stuck = Stuck(parent=window)
+    window.single_file_worker = stuck
+    stuck.start()
+    real_wait = QThread.wait
+    monkeypatch.setattr(QThread, "wait", lambda self, msec=None: False)  # всегда «не дождались»
+
+    window.shutdown_workers()
+
+    assert window.single_file_worker is stuck, "зависший воркер нельзя разрушать"
+    # Поток отпускается кооперативно. terminate() убивал его посреди
+    # Python-кода, и брошенная блокировка интерпретатора изредка вешала
+    # следующий тест на чтении перехваченного вывода.
+    release.set()
+    assert real_wait(stuck, 5000)

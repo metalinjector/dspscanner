@@ -367,3 +367,21 @@ def test_email_password_is_not_saved_unless_allowed():
 def test_email_password_can_come_from_environment(monkeypatch):
     monkeypatch.setenv("DSP_SCANNER_SMTP_PASSWORD", "из-окружения")
     assert EmailSettings().effective_password() == "из-окружения"
+
+
+def test_scanner_reads_pdf_in_spawn_process(tmp_path):
+    import fitz
+
+    path = tmp_path / "text.pdf"
+    with fitz.open() as document:
+        page = document.new_page()
+        page.insert_text((40, 40), "A contract for delivery")
+        document.save(path)
+    report = DocumentScanner().run(ScanSettings(
+        paths=[str(path)], words=["contract"], file_types={".pdf"},
+        use_ocr_for_pdf=False, max_workers=1,
+    ))
+    assert report.stats.processed == 1
+    assert not report.errors
+    assert len(report.results) == 1
+    assert report.results[0].word == "contract"

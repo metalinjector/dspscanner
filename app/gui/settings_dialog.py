@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QMessageBox, QWidget,
 )
 
-from app.config import MAX_WORKERS_LIMIT
+from app.config import MAX_OCR_WORKERS_LIMIT, MAX_WORKERS_LIMIT, auto_ocr_workers
 from app.settings_store import load_settings, save_settings, autodetect_external_programs
 
 
@@ -111,33 +111,70 @@ class SettingsDialog(QDialog):
 
         # Чекбокс: Только русский текст
         self.russian_only = QCheckBox(
-            "Искать только русский текст (быстрее, без английского)"
+            "Русский OCR (без английской модели)"
         )
         self.russian_only.setChecked(s.russian_only)
         self.russian_only.setToolTip(
-            "Если включено, для OCR используется модель rus (int8 fast).\n"
-            "Это ускоряет обработку на 20-30% и снижает потребление памяти.\n"
+            "Если включено, для OCR используется только язык rus.\n"
+            "Модель и качество выбираются отдельно.\n"
+            "Не фильтрует текст DOC/DOCX/TXT и PDF с текстовым слоем.\n"
             "Выключите, если в документах много английского текста."
         )
         ext_layout.addRow(self.russian_only)
+        language_hint = QLabel(
+            "Только для OCR сканированных PDF. Отключите для русского и английского.\n"
+            "Обычные DOC/DOCX/TXT читаются без OCR; их текст не фильтруется."
+        )
+        language_hint.setWordWrap(True)
+        ext_layout.addRow(language_hint)
 
         # Выбор градации моделей OCR
         self.ocr_model_tier = QComboBox()
-        self.ocr_model_tier.addItem("Быстрая (int8, +30% скорость)", "fast")
+        self.ocr_model_tier.addItem("Быстрая (tessdata_fast)", "fast")
         self.ocr_model_tier.addItem("Средняя (баланс скорость/точность)", "medium")
         self.ocr_model_tier.addItem("Максимальная точность (медленно)", "best")
         tier_index = {"fast": 0, "medium": 1, "best": 2}.get(
             getattr(s, "ocr_model_tier", "fast"), 0
         )
         self.ocr_model_tier.setCurrentIndex(tier_index)
+        # Раскрывать список целиком, без прокрутки
+        self.ocr_model_tier.setMaxVisibleItems(self.ocr_model_tier.count())
+        self.ocr_model_tier.setStyleSheet(
+            "QComboBox QAbstractItemView { min-height: 96px; }"
+        )
         self.ocr_model_tier.setToolTip(
             "Градация моделей Tesseract (каталоги tessdata-fast/medium/best\n"
             "рядом с tesseract.exe):\n"
-            "• Быстрая — int8-модели: +30% скорости, точность чуть ниже;\n"
-            "• Средняя — стандартные модели: баланс;\n"
+            "• Быстрая — компактные int8-модели;\n"
+            "• Средняя — tessdata: legacy + целочисленная LSTM;\n"
             "• Максимальная — самые точные модели, работают медленнее."
         )
         ext_layout.addRow("Модель OCR:", self.ocr_model_tier)
+
+        self.ocr_quality = QComboBox()
+        self.ocr_quality.addItem("Быстрый A2 (250 DPI, один проход)", "a2fast")
+        self.ocr_quality.addItem("Адаптивный (200 → 300 DPI)", "adaptive")
+        self.ocr_quality.addItem("Тщательный (300 DPI)", "thorough")
+        self.ocr_quality.addItem("Быстрый, один проход (150 DPI)", "fast150")
+        quality_index = {"a2fast": 0, "adaptive": 1, "thorough": 2, "fast150": 3}.get(
+            getattr(s, "ocr_quality", "a2fast"), 0
+        )
+        self.ocr_quality.setCurrentIndex(quality_index)
+        # Показывать все пункты сразу, не обрезая список
+        self.ocr_quality.setMaxVisibleItems(self.ocr_quality.count())
+        self.ocr_quality.setStyleSheet(
+            "QComboBox QAbstractItemView { min-height: 96px; }"
+        )
+        self.ocr_quality.setToolTip("Адаптивный режим повторяет сомнительные области. "
+                                   "Тщательный сразу использует 300 DPI; OCR может ошибаться в обоих режимах.\n"
+                                   "Быстрый: один проход на 150 DPI без повторов — максимум скорости, "
+                                   "точность ниже; мелкий текст может не распознаться.")
+        ext_layout.addRow("Качество сканов:", self.ocr_quality)
+        self.ocr_force = QCheckBox("Повторно распознавать все страницы PDF")
+        self.ocr_force.setChecked(s.ocr_force)
+        self.ocr_force.setToolTip("Для PDF с ошибочным готовым OCR-слоем. "
+                                 "Обычно изображения распознаются автоматически, а обычный текст сохраняется.")
+        ext_layout.addRow(self.ocr_force)
 
         # Кнопка "Определить всё"
         detect_all_btn = QPushButton("Определить автоматически")
@@ -169,8 +206,30 @@ class SettingsDialog(QDialog):
         self.per_file_timeout.setRange(10, 600)
         self.per_file_timeout.setValue(s.per_file_timeout)
         self.per_file_timeout.setSuffix(" с")
-        perf_layout.addRow("Таймаут на один файл:", self.per_file_timeout)
+        perf_layout.addRow("Таймаут чтения / простоя:", self.per_file_timeout)
         perf_layout.addRow(QLabel("Защита от зависания на повреждённых файлах"))
+
+        self.ocr_workers = QSpinBox()
+        self.ocr_workers.setRange(0, MAX_OCR_WORKERS_LIMIT)
+        self.ocr_workers.setSpecialValueText(f"Авто ({auto_ocr_workers()} CPU)")
+        self.ocr_workers.setToolTip(
+            "Число одновременных процессов Tesseract.\n"
+            f"«Авто» — по числу логических CPU с запасом на интерфейс: сейчас {auto_ocr_workers()}.\n"
+            "Каждый процесс распознаёт одну страницу; больше ядер ускоряет скан,\n"
+            "если файлов достаточно, чтобы их загрузить."
+        )
+        self.ocr_workers.setValue(s.ocr_workers)
+        perf_layout.addRow("Процессы OCR:", self.ocr_workers)
+        self.ocr_page_timeout = QSpinBox()
+        self.ocr_page_timeout.setRange(5, 600)
+        self.ocr_page_timeout.setSuffix(" с")
+        self.ocr_page_timeout.setValue(s.ocr_page_timeout)
+        perf_layout.addRow("Таймаут прохода OCR:", self.ocr_page_timeout)
+        self.pdf_timeout = QSpinBox()
+        self.pdf_timeout.setRange(30, 86400)
+        self.pdf_timeout.setSuffix(" с")
+        self.pdf_timeout.setValue(s.pdf_timeout)
+        perf_layout.addRow("Общий предел для PDF:", self.pdf_timeout)
 
         self.max_matches = QSpinBox()
         self.max_matches.setRange(1, 500)
@@ -303,6 +362,11 @@ class SettingsDialog(QDialog):
         settings.reset_stats_on_start = self.reset_stats_on_start.isChecked()
         settings.russian_only = self.russian_only.isChecked()
         settings.ocr_model_tier = self.ocr_model_tier.currentData() or "fast"
+        settings.ocr_quality = self.ocr_quality.currentData()
+        settings.ocr_force = self.ocr_force.isChecked()
+        settings.ocr_workers = self.ocr_workers.value()
+        settings.ocr_page_timeout = self.ocr_page_timeout.value()
+        settings.pdf_timeout = self.pdf_timeout.value()
         if not save_settings(settings):
             QMessageBox.critical(self, "Ошибка", "Не удалось сохранить настройки на диск.")
             return

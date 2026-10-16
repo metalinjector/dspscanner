@@ -11,13 +11,16 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as futu
 from dataclasses import replace
 from datetime import datetime
 from queue import Empty, Full, Queue
-from threading import BoundedSemaphore, Event, Thread
+from threading import BoundedSemaphore, Condition, Event, Thread
 from typing import Callable, Optional
 
 from app.config import (
     DocReadMethod, ErrorEntry, FileEntry, ScanReport, ScanSettings, ScanStats, SearchResult,
+    auto_ocr_workers,
 )
 from app.readers import extract_text
+from app.readers.base import ReaderOutcome
+from app.scanning import pdf_cache
 from app.readers.doc_reader import DocReader, _release_word_all
 from app.scanning.file_finder import iter_files_safe
 from app.scanning.search_engine import find_matches
@@ -46,9 +49,45 @@ PRECOUNT_MESSAGE = "Предварительный подсчёт файлов"
 _PRECOUNT_REPORT_EVERY = 250
 _ISOLATE_DOCX_ABOVE_BYTES = 16 * 1024 * 1024
 _CPU_COUNT = max(1, os.cpu_count() or 1)
-_RISKY_PROCESS_LIMIT = min(4, max(1, _CPU_COUNT // 2))
+# Сколько изолированных процессов чтения (PDF/DOC) пускать одновременно.
+# Раньше было жёстко min(4, cpu//2): на 16-ядерной машине в работе находились
+# всего 4 файла, и на корпусе из мелких PDF это упиралось в потолок — замер
+# показал, что увеличение OCR-воркеров с 8 до 32 не давало ничего (x0,97),
+# потому что одновременно читалось лишь 4 файла по одной странице. Теперь
+# предел растёт с числом ядер, но остаётся консервативным: каждый процесс
+# держит свой MuPDF и растр, а изоляция нужна против зависаний на битых PDF.
+def _risky_process_limit(cpu_count: int) -> int:
+    return max(4, min(16, cpu_count // 2))
+
+
+_RISKY_PROCESS_LIMIT = _risky_process_limit(_CPU_COUNT)
 _RISKY_SEMAPHORE = BoundedSemaphore(_RISKY_PROCESS_LIMIT)
-_OCR_LIMIT_PER_PROCESS = max(1, _CPU_COUNT // _RISKY_PROCESS_LIMIT)
+
+
+class _OcrBudget:
+    """Reservations owned by the parent: a killed process cannot leak CPU tokens."""
+    def __init__(self, limit):
+        self.limit = limit
+        self.available = limit
+        self.condition = Condition()
+
+    def acquire(self, cancel_event):
+        with self.condition:
+            if cancel_event.is_set():
+                return 0
+            while not self.available:
+                if cancel_event.is_set():
+                    return 0
+                self.condition.wait(.1)
+            count = self.available
+            self.available -= count
+            return count
+
+    def release(self, count):
+        with self.condition:
+            self.available += count
+            self.condition.notify_all()
+
 
 
 def _isolated_process_target(send_connection, entry: FileEntry, settings: ScanSettings, ocr_limit: int) -> None:
@@ -61,8 +100,17 @@ def _isolated_process_target(send_connection, entry: FileEntry, settings: ScanSe
                 pass
         from app.readers.pdf_reader import configure_ocr_limit
 
-        configure_ocr_limit(ocr_limit)
-        payload = DocumentScanner._process_one_direct(entry, settings)
+        configure_ocr_limit(
+            ocr_limit,
+            lambda index, text: send_connection.send(("page", (index, text))),
+            lambda count: send_connection.send(("capacity", count)),
+        )
+        if entry.extension == ".pdf":
+            outcome = extract_text(entry.path, entry.extension, settings)
+            send_connection.send(("pdf_outcome", outcome))
+            payload = DocumentScanner._process_one_direct(entry, settings, outcome)
+        else:
+            payload = DocumentScanner._process_one_direct(entry, settings)
         send_connection.send(("ok", payload))
     except BaseException as exc:
         try:
@@ -151,78 +199,86 @@ def _terminate_process_tree(process: multiprocessing.Process) -> None:
     process.join(timeout=2.0)
 
 
-def _run_isolated(
-    entry: FileEntry,
-    settings: ScanSettings,
-    timeout: int,
-    cancel_event: Event,
-):
+def _run_isolated(entry: FileEntry, settings: ScanSettings, timeout: int, cancel_event: Event,
+                  ocr_budget=None, on_pdf_outcome=None):
     context = multiprocessing.get_context("spawn")
     receive_connection, send_connection = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_isolated_process_target,
-        args=(send_connection, entry, settings, _OCR_LIMIT_PER_PROCESS),
-        name=f"dsp-reader-{entry.extension.lstrip('.')}",
-    )
-
+    process = None
+    ocr_slots = 0
     acquired = False
+    partial_pages = {}
+    app_settings = load_settings()
+    is_pdf = entry.extension == ".pdf"
+
+    def incomplete(message):
+        text = "\n\n".join(partial_pages[i] for i in sorted(partial_pages) if partial_pages[i].strip())
+        matches, _, _, locked = DocumentScanner._process_one_direct(entry, settings, ReaderOutcome(text=text or None))
+        return matches, None, message + ("; сохранены частичные результаты PDF" if text else ""), locked
+
     try:
         while not acquired:
             if cancel_event.is_set():
                 return [], None, "Операция отменена", False
-            acquired = _RISKY_SEMAPHORE.acquire(timeout=0.1)
-
+            acquired = _RISKY_SEMAPHORE.acquire(timeout=.1)
+        if is_pdf and settings.use_ocr_for_pdf and ocr_budget is not None:
+            ocr_slots = ocr_budget.acquire(cancel_event)
+            if not ocr_slots:
+                return [], None, "Операция отменена", False
         if cancel_event.is_set():
             return [], None, "Операция отменена", False
-
+        process = context.Process(target=_isolated_process_target,
+                                  args=(send_connection, entry, settings, ocr_slots or 1),
+                                  name=f"dsp-reader-{entry.extension.lstrip('.')}")
         process.start()
         send_connection.close()
-        deadline = time.monotonic() + max(1, timeout)
+        # A PDF has separate stall and total deadlines, and reports completed pages.
+        stall_timeout = max(timeout, 2 * app_settings.ocr_page_timeout + 45) if is_pdf else timeout
+        deadline = time.monotonic() + max(1, stall_timeout)
+        total_deadline = time.monotonic() + app_settings.pdf_timeout if is_pdf else deadline
         while True:
-            if receive_connection.poll(0.1):
+            if cancel_event.is_set():
+                _terminate_process_tree(process)
+                matches, _, _, locked = incomplete("Операция отменена")
+                return matches, None, "Операция отменена", locked
+            if time.monotonic() >= min(deadline, total_deadline):
+                _terminate_process_tree(process)
+                limit = app_settings.pdf_timeout if is_pdf and time.monotonic() >= total_deadline else stall_timeout
+                return incomplete(f"{TIMEOUT_MARKER} ({limit} с) — процесс остановлен")
+            if receive_connection.poll(.1):
                 try:
                     status, payload = receive_connection.recv()
                 except EOFError:
-                    return [], None, "Изолированный процесс завершился без результата", False
-                process.join(timeout=1.0)
+                    _terminate_process_tree(process)
+                    return incomplete("Изолированный процесс завершился без результата")
+                if status == "capacity":
+                    if ocr_budget is not None and 0 < payload < ocr_slots:
+                        ocr_budget.release(ocr_slots - payload)
+                        ocr_slots = payload
+                    continue
+                if status == "page":
+                    index, text = payload
+                    partial_pages[index] = text
+                    deadline = time.monotonic() + stall_timeout
+                    continue
+                if status == "pdf_outcome":
+                    if on_pdf_outcome is not None:
+                        on_pdf_outcome(payload)
+                    continue
+                process.join(timeout=1)
                 if process.is_alive():
                     _terminate_process_tree(process)
-                if status == "ok":
-                    return payload
-                return [], None, str(payload), False
-
+                return payload if status == "ok" else incomplete(str(payload))
             if not process.is_alive():
-                # После выхода процесса данные могут появиться в pipe чуть позже.
-                if receive_connection.poll(0.2):
-                    try:
-                        status, payload = receive_connection.recv()
-                        if status == "ok":
-                            return payload
-                        return [], None, str(payload), False
-                    except EOFError:
-                        pass
-                return [], None, f"Процесс чтения аварийно завершён (код {process.exitcode})", False
-
-            if cancel_event.is_set():
-                _terminate_process_tree(process)
-                return [], None, "Операция отменена", False
-
-            if time.monotonic() >= deadline:
-                _terminate_process_tree(process)
-                return [], None, f"{TIMEOUT_MARKER} ({timeout} с) — процесс остановлен", False
+                return incomplete(f"Процесс чтения аварийно завершён (код {process.exitcode})")
     except Exception as exc:
-        if process.is_alive():
+        if process is not None and process.is_alive():
             _terminate_process_tree(process)
-        return [], None, f"Не удалось запустить изолированный процесс: {exc}", False
+        return incomplete(f"Ошибка изолированного процесса: {exc}")
     finally:
-        try:
-            receive_connection.close()
-        except Exception:
-            pass
-        try:
-            send_connection.close()
-        except Exception:
-            pass
+        receive_connection.close()
+        send_connection.close()
+        if ocr_slots and ocr_budget is not None:
+            ocr_budget.release(ocr_slots)
         if acquired:
             _RISKY_SEMAPHORE.release()
 
@@ -364,6 +420,7 @@ class DocumentScanner:
             else:
                 on_progress(0, 0, "Поиск файлов и запуск обработки…")
         per_file_timeout = app_settings.per_file_timeout
+        ocr_budget = _OcrBudget(min(_CPU_COUNT, app_settings.ocr_workers or auto_ocr_workers()))
         processed_count = 0
 
         def progress_total() -> int:
@@ -389,6 +446,44 @@ class DocumentScanner:
                 entry.extension in _RISKY_EXTENSIONS
                 or (entry.extension == ".docx" and entry.size >= _ISOLATE_DOCX_ABOVE_BYTES)
             )
+            if isolate and entry.extension == ".pdf":
+                key = pdf_cache.cache_key(entry.path, active_settings, app_settings)
+                flight, own = pdf_cache.begin(key)
+                outcome_holder = {}
+                if not own:
+                    while not flight.event.wait(0.2):
+                        if cancel_event.is_set():
+                            return [], None, "Операция отменена", False
+                    outcome = flight.outcome
+                    if outcome is not None and outcome.text:
+                        stats.cache_hits += 1
+                        return self._process_one_direct(entry, active_settings, outcome)
+                    # Владелец не дал текста (ошибка/таймаут): честно читаем сами.
+                try:
+                    cached = pdf_cache.get(key)
+                    if cached is not None:
+                        stats.cache_hits += 1
+                        return self._process_one_direct(entry, active_settings, cached)
+                    if key is not None:
+                        stats.cache_misses += 1
+                    outcome_holder = {}
+
+                    def remember(outcome):
+                        # Первый outcome публикуется и в кэш, и ожидающим дублям.
+                        # Повторная проверка ключа: файл мог измениться во время
+                        # OCR — устаревший текст не кэшируем (но дублям отдаём).
+                        if "outcome" not in outcome_holder:
+                            outcome_holder["outcome"] = outcome
+                            if pdf_cache.cache_key(entry.path, active_settings, app_settings) == key:
+                                pdf_cache.put(key, outcome)
+
+                    result = _run_isolated(entry, active_settings, per_file_timeout,
+                                           cancel_event, ocr_budget, remember)
+                    pdf_cache.end(key, flight, outcome_holder.get("outcome"))
+                    return result
+                finally:
+                    # Гарантия публикации даже при исключении в _run_isolated.
+                    pdf_cache.end(key, flight, outcome_holder.get("outcome"))
             if isolate:
                 return _run_isolated(entry, active_settings, per_file_timeout, cancel_event)
             return self._process_one_direct(entry, active_settings)
@@ -759,7 +854,7 @@ class DocumentScanner:
         return counted
 
     @staticmethod
-    def _process_one_direct(entry: FileEntry, settings: ScanSettings):
+    def _process_one_direct(entry: FileEntry, settings: ScanSettings, outcome: ReaderOutcome | None = None):
         modified = datetime.fromtimestamp(entry.modified).strftime("%Y-%m-%d %H:%M:%S")
         name_results: list[SearchResult] = []
         if settings.filename_words:
@@ -802,7 +897,8 @@ class DocumentScanner:
         if entry.size == 0:
             return name_results, None, None, False
 
-        outcome = extract_text(entry.path, entry.extension, settings)
+        if outcome is None:
+            outcome = extract_text(entry.path, entry.extension, settings)
         if outcome.locked:
             return name_results, None, None, True
         if outcome.error:

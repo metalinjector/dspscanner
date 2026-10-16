@@ -10,14 +10,15 @@ from typing import Mapping, Sequence
 
 from PySide6.QtCore import QThread, Signal
 
-from app.config import ScanReport, ScanSettings
+from app.config import FileEntry, ScanReport, ScanSettings, auto_ocr_workers
 from app.email_sender import send_email
 from app.email_settings import EmailSettings
 from app.reporting import export_report
 from app.fileops.file_operations import copy_found_files, secure_delete_files, secure_move_files
-from app.readers import extract_text
+from app.readers import ReaderOutcome, extract_text
 from app.readers.doc_reader import _release_word_all
-from app.scanning.scanner import DocumentScanner
+from app.scanning.scanner import DocumentScanner, _OcrBudget, _run_isolated
+from app.settings_store import load_settings
 
 
 class ScanWorker(QThread):
@@ -60,10 +61,8 @@ class ScanWorker(QThread):
 class SingleFileTestWorker(QThread):
     """Диагностическое чтение одного файла вне потока событий Qt.
 
-    Чтение и OCR не ограничены общим таймаутом (в отличие от сканирования,
-    где изолированный процесс убивается по ``per_file_timeout``), поэтому на
-    многостраничном скане операция длится минуты и в GUI-потоке замораживала
-    бы окно. Здесь же освобождаются COM-ссылки: ``CoUninitialize`` должен
+    PDF читается в изолированном процессе с теми же пределами, что при поиске.
+    Диагностика многостраничного скана не блокирует окно. Здесь же освобождаются COM-ссылки: ``CoUninitialize`` должен
     вызываться в том потоке, где COM мог быть инициализирован, а не в
     главном, где OLE принадлежит Qt.
     """
@@ -79,7 +78,20 @@ class SingleFileTestWorker(QThread):
     def run(self) -> None:
         start = time.monotonic()
         try:
-            outcome = extract_text(self.path, self.path.suffix, self.settings)
+            if self.path.suffix.lower() == ".pdf":
+                stat = self.path.stat()
+                entry = FileEntry(self.path, stat.st_size, stat.st_mtime, ".pdf")
+                app_settings = load_settings()
+                captured = []
+                _, warning, error, locked = _run_isolated(
+                    entry, self.settings, app_settings.per_file_timeout, Event(),
+                    _OcrBudget(app_settings.ocr_workers or auto_ocr_workers()), captured.append,
+                )
+                outcome = captured[-1] if captured else ReaderOutcome(warning=warning, error=error, locked=locked)
+                if error:
+                    outcome.error = error
+            else:
+                outcome = extract_text(self.path, self.path.suffix, self.settings)
             elapsed = time.monotonic() - start
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -95,15 +107,30 @@ class SingleFileTestWorker(QThread):
 class CopyWorker(QThread):
     finished_ok = Signal(list)
     failed = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(self, unique_paths: Sequence[str], destination: str, parent=None):
         super().__init__(parent)
         self.unique_paths = list(unique_paths)
         self.destination = destination
+        self._cancelled = False
+        # Устанавливается в run(): обработчик завершения по нему отличает
+        # «скопировано всё» от «пользователь нажал Стоп».
+        self.was_cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:
         try:
-            self.finished_ok.emit(copy_found_files(self.unique_paths, self.destination))
+            mappings = copy_found_files(
+                self.unique_paths,
+                self.destination,
+                on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                is_cancelled=lambda: self._cancelled,
+            )
+            self.was_cancelled = bool(self._cancelled)
+            self.finished_ok.emit(mappings)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -111,6 +138,7 @@ class CopyWorker(QThread):
 class SecureOpWorker(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(self, mode: str, paths: Sequence[str], destination: str = "", passes: int = 3, parent=None):
         super().__init__(parent)
@@ -118,13 +146,28 @@ class SecureOpWorker(QThread):
         self.paths = list(paths)
         self.destination = destination
         self.passes = passes
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:
         try:
             if self.mode == "delete":
-                result = secure_delete_files(self.paths, self.passes)
+                result = secure_delete_files(
+                    self.paths,
+                    self.passes,
+                    on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                    is_cancelled=lambda: self._cancelled,
+                )
             else:
-                result = secure_move_files(self.paths, self.destination, self.passes)
+                result = secure_move_files(
+                    self.paths,
+                    self.destination,
+                    self.passes,
+                    on_progress=lambda current, total, name: self.progress.emit(current, total, name),
+                    is_cancelled=lambda: self._cancelled,
+                )
             self.finished_ok.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
