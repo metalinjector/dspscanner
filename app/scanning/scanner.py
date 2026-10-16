@@ -56,7 +56,11 @@ _CPU_COUNT = max(1, os.cpu_count() or 1)
 # потому что одновременно читалось лишь 4 файла по одной странице. Теперь
 # предел растёт с числом ядер, но остаётся консервативным: каждый процесс
 # держит свой MuPDF и растр, а изоляция нужна против зависаний на битых PDF.
-_RISKY_PROCESS_LIMIT = max(4, min(16, _CPU_COUNT // 2))
+def _risky_process_limit(cpu_count: int) -> int:
+    return max(4, min(16, cpu_count // 2))
+
+
+_RISKY_PROCESS_LIMIT = _risky_process_limit(_CPU_COUNT)
 _RISKY_SEMAPHORE = BoundedSemaphore(_RISKY_PROCESS_LIMIT)
 
 

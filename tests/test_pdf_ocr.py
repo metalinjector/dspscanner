@@ -396,8 +396,12 @@ def test_risky_process_limit_scales_but_stays_bounded(monkeypatch):
     """Одновременных PDF больше 4 (было жёстко), но с разумным потолком."""
     from app.scanning import scanner as sc
 
-    assert sc._RISKY_PROCESS_LIMIT > 4, "предел должен расти с числом ядер"
-    assert sc._RISKY_PROCESS_LIMIT <= 16, "и оставаться консервативным"
+    # Проверяется формула, а не машина: на раннере CI бывает 4 ядра, и
+    # константа там законно равна нижней границе.
+    assert sc._risky_process_limit(2) == 4, "ниже прежних 4 не опускаемся"
+    assert sc._risky_process_limit(20) == 10, "предел должен расти с числом ядер"
+    assert sc._risky_process_limit(64) == 16, "и оставаться консервативным"
+    assert sc._RISKY_PROCESS_LIMIT == sc._risky_process_limit(sc._CPU_COUNT)
 
 
 def test_ocr_workers_setting_still_wins_over_auto(monkeypatch):

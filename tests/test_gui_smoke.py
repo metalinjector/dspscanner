@@ -1552,6 +1552,29 @@ def _make_op_files(tmp_path, count):
     return paths
 
 
+def _hold_copy_on_first_file(monkeypatch):
+    """Задерживает копирование на первом файле, пока тест не отпустит.
+
+    Без этого исход зависел от скорости диска: 30–40 маленьких файлов на
+    быстрой машине копировались быстрее, чем тест успевал вмешаться.
+    """
+    import threading
+
+    from app.fileops import file_operations
+
+    started = threading.Event()
+    release = threading.Event()
+    original = file_operations._copy_exclusive
+
+    def held_copy(source, target):
+        started.set()
+        release.wait(30)
+        original(source, target)
+
+    monkeypatch.setattr(file_operations, "_copy_exclusive", held_copy)
+    return started, release
+
+
 def test_secure_op_worker_cancel_reaches_the_file_layer(qt_app, tmp_path):
     """Флаг внутри воркера останавливает обработку реальных файлов."""
     import time
@@ -1575,21 +1598,21 @@ def test_secure_op_worker_cancel_reaches_the_file_layer(qt_app, tmp_path):
     assert result.succeeded < len(files), "отмена не остановила обработку"
 
 
-def test_copy_worker_reports_cancellation(qt_app, tmp_path):
+def test_copy_worker_reports_cancellation(qt_app, tmp_path, monkeypatch):
     """Копирование тоже прерывается, и воркер сообщает об отмене."""
-    import time
-
     from app.gui.workers import CopyWorker
 
     files = _make_op_files(tmp_path, 30)
     destination = tmp_path / "copy_dst"
+    started, release = _hold_copy_on_first_file(monkeypatch)
     worker = CopyWorker(files, str(destination))
     results = []
     worker.finished_ok.connect(results.append)
 
     worker.start()
-    time.sleep(0.05)
+    assert started.wait(10), "копирование не началось"
     worker._cancelled = True
+    release.set()
     assert worker.wait(30_000)
 
     qt_app.processEvents()
@@ -1674,7 +1697,9 @@ def test_stop_button_survives_a_scan_and_a_file_operation_together(window, monke
     window._mark_scan_active(False)
     assert window.stop_btn.isEnabled() is False
 
-def test_closing_the_window_waits_for_a_running_worker(window, qt_app, tmp_path):
+def test_closing_the_window_waits_for_a_running_worker(
+    window, qt_app, tmp_path, monkeypatch
+):
     """Закрытие окна не разрушает живой воркер: иначе процесс падает с abort.
 
     Регрессионный тест на реальный вылет 0xC0000409: Qt вызывает qFatal
@@ -1683,17 +1708,21 @@ def test_closing_the_window_waits_for_a_running_worker(window, qt_app, tmp_path)
     окно закрывается сразу — проверяем, что процесс не падает, поток
     дожидается, а ссылка на воркер снимается.
     """
-    import time
+    import threading
 
     from app.gui.workers import CopyWorker
 
     files = _make_op_files(tmp_path, 40)
     destination = tmp_path / "dst_close"
+    started, release = _hold_copy_on_first_file(monkeypatch)
     worker = CopyWorker(files, str(destination), parent=window)
     window.copy_worker = worker
     worker.start()
-    time.sleep(0.05)
-    assert worker.isRunning(), "воркер не успел запуститься"
+    assert started.wait(10), "воркер не успел запуститься"
+    assert worker.isRunning()
+    # Поток отпускается уже во время ожидания: shutdown_workers() обязан
+    # дождаться живого потока, а не застать его завершённым.
+    threading.Timer(0.2, release.set).start()
 
     # Симулируем выход: то, что делает main() после app.exec().
     window.shutdown_workers()
