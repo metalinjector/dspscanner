@@ -1741,21 +1741,27 @@ def test_shutdown_workers_is_safe_without_any_worker(window):
 
 def test_shutdown_workers_keeps_a_stuck_worker_alive(window, monkeypatch):
     """Зависший воркер не разрушается: abort хуже, чем незакрытый поток."""
+    import threading
+
     from PySide6.QtCore import QThread
+
+    release = threading.Event()
 
     class Stuck(QThread):
         def run(self):
-            while True:
-                import time
-                time.sleep(0.1)
+            release.wait(30)
 
     stuck = Stuck(parent=window)
     window.single_file_worker = stuck
     stuck.start()
+    real_wait = QThread.wait
     monkeypatch.setattr(QThread, "wait", lambda self, msec=None: False)  # всегда «не дождались»
 
     window.shutdown_workers()
 
     assert window.single_file_worker is stuck, "зависший воркер нельзя разрушать"
-    stuck.terminate()
-    stuck.wait(5000)
+    # Поток отпускается кооперативно. terminate() убивал его посреди
+    # Python-кода, и брошенная блокировка интерпретатора изредка вешала
+    # следующий тест на чтении перехваченного вывода.
+    release.set()
+    assert real_wait(stuck, 5000)
