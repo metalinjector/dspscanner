@@ -686,6 +686,7 @@ class ResultsTableModel(QAbstractTableModel):
         remaining = [row for row in self._all_results if row.full_path not in paths]
         if len(remaining) == len(self._all_results):
             return
+        old_checked = set(self._checked_keys)
         self.beginResetModel()
         self._reset_state()
         for result in remaining:
@@ -700,6 +701,7 @@ class ResultsTableModel(QAbstractTableModel):
                 self._groups[row].results.append(result)
             self._all_results.append(result)
             self._note_context(result)
+        self._checked_keys = {k for k in old_checked if k in self._group_rows}
         # Удаление файла может вернуть имени однозначность: уточнение папкой
         # больше не нужно, и подпись снова становится просто именем.
         self._refresh_labels(self._paths_by_name)

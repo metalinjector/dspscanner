@@ -173,3 +173,62 @@ def test_secure_move_keeps_the_original_when_the_copy_cannot_be_verified(
 
     assert result.succeeded == 0
     assert source.read_bytes() == payload, "оригинал уничтожен без проверки копии"
+
+
+def test_secure_delete_readonly_file(tmp_path):
+    """Файл только для чтения (chmod 0444 / FILE_ATTRIBUTE_READONLY) успешно удаляется."""
+    victim = tmp_path / "readonly.txt"
+    victim.write_bytes(b"data" * 100)
+    victim.chmod(0o444)
+
+    result = fops.secure_delete_files([str(victim)], passes=1)
+    assert result.succeeded == 1
+    assert not victim.exists()
+
+
+def test_secure_delete_progress_and_cancel(tmp_path):
+    """Проверка коллбэков прогресса и досрочной отмены."""
+    files = []
+    for i in range(5):
+        f = tmp_path / f"test_{i}.txt"
+        f.write_text("sample")
+        files.append(str(f))
+
+    progress_log = []
+    def on_progress(cur, total, name):
+        progress_log.append((cur, total, name))
+
+    call_count = 0
+    def is_cancelled():
+        nonlocal call_count
+        call_count += 1
+        return call_count > 2
+
+    result = fops.secure_delete_files(files, passes=1, on_progress=on_progress, is_cancelled=is_cancelled)
+    assert result.succeeded == 2
+    assert len(progress_log) == 2
+    assert progress_log[0][1] == 5
+
+
+def test_secure_delete_preserves_extension_in_scrub(tmp_path):
+    """_scrub_name сохраняет расширение файла для предотвращения ложных срабатываний антивируса."""
+    victim = tmp_path / "document.docx"
+    victim.write_bytes(b"DATA" * 50)
+    scrubbed = fops._scrub_name(victim)
+    assert scrubbed.suffix == ".docx"
+    assert scrubbed.stem != "document"
+    assert scrubbed.exists()
+
+
+def test_fsync_directory_windows_skip(tmp_path, monkeypatch):
+    """На Windows _fsync_directory сразу выходит, не пытаясь открыть каталог."""
+    monkeypatch.setattr(fops.os, "name", "nt")
+    opened = []
+    original_open = fops.os.open
+    def tracking_open(*args, **kwargs):
+        opened.append(args)
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(fops.os, "open", tracking_open)
+    fops._fsync_directory(tmp_path)
+    assert len(opened) == 0

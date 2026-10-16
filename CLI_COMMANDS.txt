@@ -1,3 +1,11 @@
+OCR PDF — новые параметры 4.7.0.0
+
+python main.py --cli --no-config --path "C:\Docs" --content-terms "время" --types pdf --ocr --ocr-model-tier fast --ocr-quality adaptive --russian-only --ocr-workers 0 --ocr-page-timeout 60 --pdf-timeout 1800
+
+Для смешанных русско-английских документов: --no-russian-only (нужны rus и eng).
+Для тщательного OCR: --ocr-quality thorough. Для ошибочного готового текстового слоя: --ocr-force.
+Полное описание и ограничения — README.md, раздел OCR PDF 4.7.0.0.
+
 DSP Scanner 2.9.9 — ПОЛНОЕ ОПИСАНИЕ КОМАНДНОЙ СТРОКИ
 =========================================================
 
